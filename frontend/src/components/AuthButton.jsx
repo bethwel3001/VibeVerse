@@ -1,22 +1,101 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
+import spotifyService from '../services/spotify';
 import { motion } from 'framer-motion';
 import { Music } from 'lucide-react';
-import { spotifyService } from '../services/spotify';
+const AuthButton = ({ onAuthStateChange }, { size = 'large' }) => {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [userProfile, setUserProfile] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-const AuthButton = ({ size = 'large' }) => {
-  const handleLogin = async () => {
+const buttonClasses = size === 'large'
+    ? 'px-8 py-4 text-lg'
+    : 'px-6 py-3 text-base';
+
+  useEffect(() => {
+    checkAuthStatus();
+  }, []);
+
+  const checkAuthStatus = async () => {
     try {
-      const authUrl = await spotifyService.getAuthUrl(); // ✅ await the promise
-      window.location.href = authUrl;
+      setIsLoading(true);
+      const authenticated = spotifyService.isAuthenticated();
+      setIsAuthenticated(authenticated);
+      
+      if (authenticated) {
+        try {
+          const profile = await spotifyService.getUserProfile();
+          setUserProfile(profile);
+        } catch (error) {
+          console.error('Error fetching user profile:', error);
+          // If profile fetch fails, user might not be properly authenticated
+          setIsAuthenticated(false);
+          spotifyService.clearTokens();
+        }
+      }
+      
+      // Notify parent component of auth state
+      if (onAuthStateChange) {
+        onAuthStateChange(authenticated);
+      }
     } catch (error) {
-      console.error('Failed to get auth URL:', error);
-      alert('Something went wrong while connecting to Spotify.');
+      console.error('Error checking auth status:', error);
+      setIsAuthenticated(false);
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  const buttonClasses = size === 'large'
-    ? 'px-8 py-4 text-lg'
-    : 'px-6 py-3 text-base';
+  const handleLogin = () => {
+    window.location.href = spotifyService.getLoginUrl();
+  };
+
+  const handleLogout = () => {
+    spotifyService.logout();
+    setIsAuthenticated(false);
+    setUserProfile(null);
+    
+    if (onAuthStateChange) {
+      onAuthStateChange(false);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-500"></div>
+      </div>
+    );
+  }
+
+  if (isAuthenticated && userProfile) {
+    return (
+      <div className="flex items-center space-x-4">
+        <div className="flex items-center space-x-3">
+          {userProfile.images && userProfile.images.length > 0 && (
+            <img
+              src={userProfile.images[0].url}
+              alt={userProfile.display_name}
+              className="w-10 h-10 rounded-full object-cover"
+            />
+          )}
+          <div className="text-left">
+            <p className="text-sm font-medium text-gray-900 dark:text-white">
+              {userProfile.display_name || 'Spotify User'}
+            </p>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              {userProfile.followers?.total || 0} followers
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={handleLogout}
+          className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-600 dark:hover:bg-gray-700"
+        >
+          Logout
+        </button>
+      </div>
+    );
+  }
 
   return (
     <motion.button
