@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { LogOut, RefreshCw, Download, Share2 } from 'lucide-react';
-import { spotifyService } from '../services/spotify';
+import spotifyService from '../services/spotify';
 import { openaiService } from '../services/openai';
 import { calculateMoodProfile, getPersonalityType, generateMoodInsights } from '../utils/moodUtils';
 import { getTimeBasedGreeting } from '../utils/themeUtils';
