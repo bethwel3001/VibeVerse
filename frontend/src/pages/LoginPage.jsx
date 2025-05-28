@@ -7,7 +7,7 @@ import { getTimeBasedGreeting } from '../utils/themeUtils';
 const LoginPage = () => {
   useEffect(() => {
     // Preload some assets or setup analytics
-    document.title = 'VibeMatch - Discover Your Music Personality';
+    document.title = 'vibematch - your music personality unlocked.';
   }, []);
 
   const features = [
