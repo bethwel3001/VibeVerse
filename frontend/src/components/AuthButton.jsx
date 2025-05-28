@@ -2,12 +2,13 @@ import React, { useState, useEffect } from 'react';
 import spotifyService from '../services/spotify';
 import { motion } from 'framer-motion';
 import { Music } from 'lucide-react';
-const AuthButton = ({ onAuthStateChange }, { size = 'large' }) => {
+
+const AuthButton = ({ onAuthStateChange, size = 'large' }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [userProfile, setUserProfile] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
 
-const buttonClasses = size === 'large'
+  const buttonClasses = size === 'large'
     ? 'px-8 py-4 text-lg'
     : 'px-6 py-3 text-base';
 
@@ -20,20 +21,18 @@ const buttonClasses = size === 'large'
       setIsLoading(true);
       const authenticated = spotifyService.isAuthenticated();
       setIsAuthenticated(authenticated);
-      
+
       if (authenticated) {
         try {
           const profile = await spotifyService.getUserProfile();
           setUserProfile(profile);
         } catch (error) {
           console.error('Error fetching user profile:', error);
-          // If profile fetch fails, user might not be properly authenticated
           setIsAuthenticated(false);
           spotifyService.clearTokens();
         }
       }
-      
-      // Notify parent component of auth state
+
       if (onAuthStateChange) {
         onAuthStateChange(authenticated);
       }
@@ -45,15 +44,18 @@ const buttonClasses = size === 'large'
     }
   };
 
-  const handleLogin = () => {
-    window.location.href = spotifyService.getLoginUrl();
+  const handleLogin = async () => {
+    try {
+      await spotifyService.login(); // this redirects the user
+    } catch (err) {
+      console.error('Failed to initiate login', err);
+    }
   };
 
   const handleLogout = () => {
-    spotifyService.logout();
+    spotifyService.clearTokens();
     setIsAuthenticated(false);
     setUserProfile(null);
-    
     if (onAuthStateChange) {
       onAuthStateChange(false);
     }
@@ -71,7 +73,7 @@ const buttonClasses = size === 'large'
     return (
       <div className="flex items-center space-x-4">
         <div className="flex items-center space-x-3">
-          {userProfile.images && userProfile.images.length > 0 && (
+          {userProfile.images?.[0]?.url && (
             <img
               src={userProfile.images[0].url}
               alt={userProfile.display_name}
@@ -105,14 +107,12 @@ const buttonClasses = size === 'large'
       }}
       whileTap={{ scale: 0.95 }}
       onClick={handleLogin}
-      className={`
-        bg-gradient-to-r from-spotify-green to-spotify-green-dark 
+      className={`bg-gradient-to-r from-spotify-green to-spotify-green-dark 
         text-white font-bold rounded-full 
         shadow-lg hover:shadow-neon
         transition-all duration-300 
         inline-flex items-center gap-3
-        ${buttonClasses}
-      `}
+        ${buttonClasses}`}
     >
       <Music size={24} />
       Connect with Spotify
