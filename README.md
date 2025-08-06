@@ -1,6 +1,6 @@
-# 🎧 VibeVerse 
+# 🎧 VibeFy 
 *A Spotify Mood & Personality Analyzer*
-VibeVerse is a fullstack web app that connects to your Spotify account, analyzes your top tracks and listening habits, and reveals your musical mood, energy, and vibe. Built for the Vibe Coding Hackathon 2025.
+VibeVerse is a fullstack web app that connects to your Spotify account, analyzes your top tracks and listening habits, and reveals your musical mood, energy, and vibe. Built for the Vibe Coding Hackathon 2025 courtesy of PLP Africa.
 
 ## ⚡ Tech Stack
 
