@@ -1,135 +1,128 @@
-import { FaGithub, FaPlay, FaMoon, FaSun, FaBars, FaTimes } from 'react-icons/fa';
+import {
+  FaGithub,
+  FaMoon,
+  FaSun,
+  FaBars,
+  FaTimes,
+} from 'react-icons/fa';
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 
-export default function Navbar({ showQuit = false }) {
-  const [darkMode, setDarkMode] = useState(true);
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [isScrolled, setIsScrolled] = useState(false);
+export default function Navbar({ showQuit = false, transparent = false }) {
+  const [darkMode, setDarkMode] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
-    const handleScroll = () => {
-      setIsScrolled(window.scrollY > 10);
-    };
+    const handleScroll = () => setScrolled(window.scrollY > 10);
     window.addEventListener('scroll', handleScroll);
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  const toggleMobileMenu = () => {
-    setIsMobileMenuOpen(!isMobileMenuOpen);
+  const toggleTheme = () => {
+    setDarkMode(!darkMode);
+    document.documentElement.classList.toggle('dark');
   };
 
   return (
-    <nav className={`fixed w-full z-50 transition-all duration-300 ${isScrolled ? 'bg-spotify-black/90 backdrop-blur-sm py-3 shadow-lg' : 'bg-spotify-black py-4'}`}>
-      <div className="container mx-auto px-6 flex justify-between items-center">
-        {/* Logo - Always visible */}
-        <Link 
-          to="/" 
-          className="text-2xl md:text-3xl font-bold text-white hover:text-spotify-green transition-colors duration-300"
-        >
-          Vibeify
-        </Link>
+    <nav
+      className={`fixed top-0 w-full z-50 transition-all duration-300 ${
+        transparent && !scrolled
+          ? 'bg-transparent'
+          : 'bg-white/90 dark:bg-gray-900/90 backdrop-blur-lg border-b border-gray-300 dark:border-gray-800 shadow-md'
+      }`}
+    >
+      <div className="max-w-7xl mx-auto px-4">
+        <div className="flex justify-between items-center h-16">
+          {/* Logo */}
+          <Link to="/" className="flex items-center">
+            <span className="text-2xl font-bold bg-gradient-to-r from-green-400 to-lime-500 bg-clip-text text-transparent">
+              Vibeify
+            </span>
+          </Link>
 
-        {/* Desktop Navigation */}
-        <div className="hidden md:flex items-center gap-6">
-          <button 
-            onClick={() => setDarkMode(!darkMode)}
-            className="text-spotify-light hover:text-white transition-all duration-300 transform hover:scale-110"
-            aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-          >
-            {darkMode ? <FaSun size={24} /> : <FaMoon size={24} />}
-          </button>
-          
-          <a 
-            href="https://github.com/bethwel3001/VibeVerse" 
-            target="_blank" 
-            rel="noopener noreferrer"
-            className="text-spotify-light hover:text-white transition-all duration-300 transform hover:scale-110"
-            aria-label="View on GitHub"
-          >
-            <FaGithub size={24} />
-          </a>
-          
-          <a 
-            href="#" 
-            className="text-spotify-light hover:text-white transition-all duration-300 transform hover:scale-110"
-            aria-label="Download app"
-          >
-            <FaPlay size={24} />
-          </a>
-          
-          {showQuit && (
-            <Link 
-              to="/" 
-              className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-full text-sm font-medium transition-all duration-300 hover:shadow-lg"
+          {/* Desktop Navigation */}
+          <div className="hidden md:flex items-center gap-5">
+            <button
+              onClick={toggleTheme}
+              className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+              aria-label="Toggle theme"
             >
-              Quit Session
-            </Link>
-          )}
-        </div>
-
-        {/* Mobile Menu Button */}
-        <button 
-          className="md:hidden text-white focus:outline-none"
-          onClick={toggleMobileMenu}
-          aria-label="Toggle menu"
-        >
-          {isMobileMenuOpen ? <FaTimes size={24} /> : <FaBars size={24} />}
-        </button>
-
-        {/* Mobile Menu */}
-        {isMobileMenuOpen && (
-          <div className="md:hidden absolute top-full left-0 right-0 bg-spotify-dark shadow-xl py-4 px-6 animate-slideDown">
-            <div className="flex flex-col items-center gap-6">
-              <button 
-                onClick={() => {
-                  setDarkMode(!darkMode);
-                  setIsMobileMenuOpen(false);
-                }}
-                className="flex items-center text-white text-lg w-full justify-center py-2 border-b border-spotify-light/20"
-              >
-                {darkMode ? (
-                  <>
-                    <FaSun className="mr-2" /> Light Mode
-                  </>
-                ) : (
-                  <>
-                    <FaMoon className="mr-2" /> Dark Mode
-                  </>
-                )}
-              </button>
-              
-              <a 
-                href="https://github.com/bethwel3001/VibeVerse" 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="flex items-center text-white text-lg w-full justify-center py-2 border-b border-spotify-light/20"
-                onClick={() => setIsMobileMenuOpen(false)}
-              >
-                <FaGithub className="mr-2" /> GitHub
-              </a>
-              
-              <a 
-                href="#" 
-                className="flex items-center text-white text-lg w-full justify-center py-2 border-b border-spotify-light/20"
-                onClick={() => setIsMobileMenuOpen(false)}
-              >
-                <FaPlay className="mr-2" /> Download App
-              </a>
-              
-              {showQuit && (
-                <Link 
-                  to="/" 
-                  className="bg-red-500 hover:bg-red-600 text-white px-6 py-3 rounded-full text-sm font-medium w-full text-center transition-all duration-300 mt-2"
-                  onClick={() => setIsMobileMenuOpen(false)}
-                >
-                  Quit Session
-                </Link>
+              {darkMode ? (
+                <FaSun className="text-yellow-400" />
+              ) : (
+                <FaMoon className="text-gray-800 dark:text-gray-100" />
               )}
-            </div>
+            </button>
+
+            <a
+              href="https://github.com/bethwel3001/VibeVerse"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+            >
+              <FaGithub className="text-gray-800 dark:text-gray-100" />
+            </a>
+
+            {showQuit && (
+              <Link
+                to="/"
+                className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-full text-sm font-semibold shadow-sm"
+              >
+                Quit Session
+              </Link>
+            )}
           </div>
-        )}
+
+          {/* Mobile Menu Button */}
+          <div className="md:hidden">
+            <button
+              onClick={() => setMobileOpen(!mobileOpen)}
+              className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+            >
+              {mobileOpen ? (
+                <FaTimes className="text-xl text-gray-800 dark:text-white" />
+              ) : (
+                <FaBars className="text-xl text-gray-800 dark:text-white" />
+              )}
+            </button>
+          </div>
+        </div>
       </div>
+
+      {/* Mobile Menu */}
+      {mobileOpen && (
+        <div className="md:hidden bg-white dark:bg-gray-900 border-t border-gray-300 dark:border-gray-700 shadow-lg animate-slideDown">
+          <div className="px-6 py-4 flex flex-col gap-3 text-gray-900 dark:text-white">
+            <button
+              onClick={toggleTheme}
+              className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+            >
+              {darkMode ? <FaSun className="text-yellow-400" /> : <FaMoon />}
+              <span>{darkMode ? 'Light Mode' : 'Dark Mode'}</span>
+            </button>
+
+            <a
+              href="https://github.com/bethwel3001/VibeVerse"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+            >
+              <FaGithub />
+              <span>GitHub</span>
+            </a>
+
+            {showQuit && (
+              <Link
+                to="/"
+                className="bg-red-500 hover:bg-red-600 text-white px-4 py-3 rounded-lg text-center font-semibold shadow"
+              >
+                Quit Session
+              </Link>
+            )}
+          </div>
+        </div>
+      )}
     </nav>
   );
 }
