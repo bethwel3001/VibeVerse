@@ -22,7 +22,7 @@ export default function Footer() {
           <p className="text-spotify-light">Creator’s handles</p>
           <div className="flex gap-4">
             <a
-              href="https://instagram.com/creator"
+              href="https://instagram.com/am_kiplagat"
               target="_blank"
               rel="noreferrer"
               className="p-3 rounded-full bg-white/10 hover:bg-white/20 dark:bg-black/20 dark:hover:bg-black/30 transition-all hover:scale-110 text-spotify-green"
@@ -30,7 +30,7 @@ export default function Footer() {
               <FaInstagram size={18} />
             </a>
             <a
-              href="https://twitter.com/creator"
+              href="https://twitter.com/am_kiplagat"
               target="_blank"
               rel="noreferrer"
               className="p-3 rounded-full bg-white/10 hover:bg-white/20 dark:bg-black/20 dark:hover:bg-black/30 transition-all hover:scale-110 text-spotify-green"
@@ -38,7 +38,7 @@ export default function Footer() {
               <FaXTwitter size={18} />
             </a>
             <a
-              href="https://github.com/creator"
+              href="https://github.com/bethwel3001"
               target="_blank"
               rel="noreferrer"
               className="p-3 rounded-full bg-white/10 hover:bg-white/20 dark:bg-black/20 dark:hover:bg-black/30 transition-all hover:scale-110 text-spotify-green"
@@ -59,7 +59,7 @@ export default function Footer() {
           <div className="flex gap-4">
             {/* Contribute */}
             <a
-              href="https://github.com/creator/project"
+              href="https://github.com/bethwel3001/VibeVerse"
               target="_blank"
               rel="noreferrer"
               className="flex flex-col items-center gap-1 text-center group"
@@ -78,7 +78,7 @@ export default function Footer() {
               <div className="p-3 rounded-full bg-white/10 hover:bg-white/20 dark:bg-black/20 dark:hover:bg-black/30 transition-all group-hover:scale-110 text-spotify-green">
                 <FaChevronUp size={18} />
               </div>
-              <span className="text-xs text-spotify-light">Top</span>
+              <span className="text-xs text-spotify-light">back To Top</span>
             </a>
 
             {/* App Button */}
