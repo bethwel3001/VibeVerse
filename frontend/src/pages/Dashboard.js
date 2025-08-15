@@ -76,8 +76,8 @@ export default function Dashboard() {
     if ((!artists.length) && (!tracks.length)) return "Your listening is as mysterious as a demo playlist. Go hit play!";
     const firstArtist = artists?.[0]?.name;
     const firstTrack = tracks?.[0]?.name;
-    if (firstArtist && firstTrack) return `You loop ${firstArtist} and call ${firstTrack} “variety.”`;
-    if (firstArtist) return `You vibe like you put ${firstArtist} on loop and call it “research.”`;
+    if (firstArtist && firstTrack) return `You loop ${firstArtist} and call ${firstTrack} "variety."`;
+    if (firstArtist) return `You vibe like you put ${firstArtist} on loop and call it "research."`;
     if (firstTrack) return `You replay ${firstTrack} like it's a thesis topic.`;
     return "Chaotic neutral energy. Respect.";
   }
@@ -86,9 +86,9 @@ export default function Dashboard() {
     const genres = (artists || []).flatMap(a => a.genres || []);
     const topGenre = genres[0];
     if ((!artists.length) && (!tracks.length)) return "A musical ghost — build your vibe with a few spins.";
-    if (topGenre && tracks.length) return `You’re a ${topGenre} listener with a soft spot for ${tracks[0].name}.`;
+    if (topGenre && tracks.length) return `You're a ${topGenre} listener with a soft spot for ${tracks[0].name}.`;
     if (topGenre) return `Mostly ${topGenre} with curious detours.`;
-    if (tracks.length) return `Undefined genre, but you’re loyal to ${tracks[0].name}.`;
+    if (tracks.length) return `Undefined genre, but you're loyal to ${tracks[0].name}.`;
     return "Eclectic on shuffle — we love that.";
   }
 
@@ -105,6 +105,10 @@ export default function Dashboard() {
     await logout();
     navigate('/');
   }
+
+  const handleQuit = () => {
+    window.location.href = 'http://127.0.0.1:3000'; // Redirects to home page
+  };
 
   async function handleShare() {
     const shareData = {
@@ -187,7 +191,7 @@ export default function Dashboard() {
             <button onClick={handleShare} className="px-3 py-2 border border-green-500 rounded-lg flex items-center gap-2 hover:bg-green-500 hover:text-black transition">
               <FaShareAlt /> Share
             </button>
-            <button onClick={handleLogout} className="px-3 py-2 border border-red-500 text-red-500 rounded-lg flex items-center gap-2 hover:bg-red-500 hover:text-black transition">
+            <button onClick={handleQuit} className="px-3 py-2 border border-red-500 text-red-500 rounded-lg flex items-center gap-2 hover:bg-red-500 hover:text-black transition">
               <FaSignOutAlt /> Quit
             </button>
           </div>
