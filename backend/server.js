@@ -9,7 +9,6 @@ require('dotenv').config();
 const app = express();
 app.use(express.json());
 
-// Use cookie-parser with SESSION_SECRET to enable signed cookies
 const {
   SESSION_SECRET = 'super_secret_key',
   SPOTIFY_CLIENT_ID,
@@ -21,417 +20,419 @@ const {
 } = process.env;
 
 app.use(cookieParser(SESSION_SECRET));
+app.use(cors({ origin: FRONTEND_URI, credentials: true }));
 
-// Enable CORS for frontend and allow credentials (cookies)
-app.use(
-  cors({
-    origin: FRONTEND_URI,
-    credentials: true,
-  })
-);
-
-// In-memory session store (for demo only)
+// In-memory session store (demo)
 const sessions = {};
 
-// Helper: random hex string
-function randomString(length = 16) {
-  return crypto.randomBytes(length).toString('hex');
+// small helper to create random session/state strings
+function randomString(len = 16) {
+  return crypto.randomBytes(len).toString('hex');
 }
 
+/**
+ * Axios SPOTIFY instance for backend calls with timeout + retry wrapper
+ */
+const spotifyAxios = axios.create({
+  baseURL: 'https://api.spotify.com/v1/',
+  timeout: 8000, // 8s per request
+  // don't set headers (Authorization set per-request)
+});
+
+/** Very small retry helper for transient errors */
+async function retry(fn, attempts = 3, initialDelay = 300) {
+  let attempt = 0;
+  let delay = initialDelay;
+  while (attempt < attempts) {
+    try {
+      return await fn();
+    } catch (err) {
+      attempt++;
+      if (attempt >= attempts) throw err;
+      // exponential backoff
+      await new Promise(r => setTimeout(r, delay));
+      delay *= 2;
+    }
+  }
+}
+
+/** Spotify authorization URL builder */
 function spotifyAuthorizeURL(state) {
   const scope = [
     'user-read-private',
     'user-read-email',
     'user-top-read',
     'user-read-recently-played',
+    'playlist-read-private',
+    'user-read-playback-state'
   ].join(' ');
-
   const params = {
     response_type: 'code',
     client_id: SPOTIFY_CLIENT_ID,
     scope,
     redirect_uri: SPOTIFY_REDIRECT_URI,
     state,
-    // force consent screen in dev so scopes are definitely granted
-    show_dialog: NODE_ENV === 'development',
+    show_dialog: NODE_ENV === 'development'
   };
-
   return `https://accounts.spotify.com/authorize?${qs.stringify(params)}`;
 }
 
-/**
- * Exchange code for token (server-side)
- */
+/** Exchange authorization code for tokens */
 async function exchangeCodeForToken(code) {
   const tokenUrl = 'https://accounts.spotify.com/api/token';
-  const data = {
+  const data = qs.stringify({
     grant_type: 'authorization_code',
     code,
-    redirect_uri: SPOTIFY_REDIRECT_URI,
-  };
-
+    redirect_uri: SPOTIFY_REDIRECT_URI
+  });
   const headers = {
     'Content-Type': 'application/x-www-form-urlencoded',
-    Authorization:
-      'Basic ' + Buffer.from(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`).toString('base64'),
+    Authorization: 'Basic ' + Buffer.from(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`).toString('base64')
   };
-
-  const resp = await axios.post(tokenUrl, qs.stringify(data), { headers });
+  const resp = await retry(() => axios.post(tokenUrl, data, { headers }), 3, 300);
   return resp.data;
 }
 
-/**
- * Refresh token
- */
+/** Refresh access token */
 async function refreshAccessToken(refresh_token) {
   const tokenUrl = 'https://accounts.spotify.com/api/token';
-  const data = {
-    grant_type: 'refresh_token',
-    refresh_token,
-  };
+  const data = qs.stringify({ grant_type: 'refresh_token', refresh_token });
   const headers = {
     'Content-Type': 'application/x-www-form-urlencoded',
-    Authorization:
-      'Basic ' + Buffer.from(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`).toString('base64'),
+    Authorization: 'Basic ' + Buffer.from(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`).toString('base64')
   };
-
-  const resp = await axios.post(tokenUrl, qs.stringify(data), { headers });
+  const resp = await retry(() => axios.post(tokenUrl, data, { headers }), 3, 300);
   return resp.data;
 }
 
 /**
- * Proxy GET to Spotify Web API using stored session tokens.
- * Automatically refreshes if token expired (simple check).
+ * Low-level GET to Spotify API using stored session tokens.
+ * Automatically refreshes tokens if expired.
  */
 async function spotifyGet(sessionId, path, params = {}) {
   const session = sessions[sessionId];
-  if (!session) throw new Error('No session');
+  if (!session) {
+    const err = new Error('No session');
+    err.status = 401;
+    throw err;
+  }
 
-  try {
-    // refresh if expired (expires_at stored as ms timestamp)
-    const now = Date.now();
-    if (session.expires_at && session.expires_at <= now) {
-      console.log('Access token expired — refreshing...');
+  // refresh if expired
+  const now = Date.now();
+  if (session.expires_at && session.expires_at <= now) {
+    try {
       const newTokens = await refreshAccessToken(session.refresh_token);
       session.access_token = newTokens.access_token;
-      if (newTokens.expires_in) {
-        session.expires_at = Date.now() + newTokens.expires_in * 1000;
-      }
+      if (newTokens.expires_in) session.expires_at = Date.now() + newTokens.expires_in * 1000;
       if (newTokens.refresh_token) session.refresh_token = newTokens.refresh_token;
+    } catch (e) {
+      // propagate refresh failure
+      const err = new Error('Failed to refresh token: ' + (e.response?.data?.error || e.message));
+      err.status = e.response?.status || 500;
+      throw err;
     }
+  }
 
-    const headers = { Authorization: `Bearer ${session.access_token}` };
-    const url = `https://api.spotify.com/v1/${path}`;
-    const resp = await axios.get(url, { headers, params });
-    return resp.data;
+  const headers = { Authorization: `Bearer ${session.access_token}` };
+
+  // Use retry wrapper around spotifyAxios.get
+  try {
+    const result = await retry(() => spotifyAxios.get(path, { headers, params }), 2, 250);
+    return result.data;
   } catch (e) {
-    console.error('spotifyGet ERROR ->', {
-      path,
-      status: e.response?.status,
-      data: e.response?.data,
-      message: e.message,
-    });
-    const message = e.response?.data?.error || e.response?.data || e.message;
+    const message = e.response?.data || e.message;
     const err = new Error('Spotify API error: ' + JSON.stringify(message));
     err.status = e.response?.status || 500;
     throw err;
   }
 }
 
-/** ---------- Small helpers for the vibe summary ---------- **/
-
-function pickTopGenres(artists = [], max = 3) {
+/** small helpers */
+function pickTopGenres(artists = [], max = 6) {
   const counts = {};
   for (const a of artists) {
-    (a.genres || []).forEach(g => {
-      counts[g] = (counts[g] || 0) + 1;
-    });
+    (a.genres || []).forEach(g => (counts[g] = (counts[g] || 0) + 1));
   }
   return Object.entries(counts)
     .sort((a, b) => b[1] - a[1])
     .slice(0, max)
-    .map(([g]) => g);
-}
-
-function firstDefinedImage(obj) {
-  if (!obj) return null;
-  const imgs = obj.images || obj.album?.images || [];
-  return imgs?.[0]?.url || null;
+    .map(([genre, count]) => ({ genre, count }));
 }
 
 function buildRoast(artists = [], tracks = []) {
-  if (artists.length === 0 && tracks.length === 0) {
-    return "Your listening is as mysterious as a demo playlist. Go hit play!";
-  }
-  const a = artists[0]?.name;
-  const t = tracks[0]?.name;
+  if (!artists.length && !tracks.length) return "Your listening is as mysterious as a demo playlist. Go hit play!";
+  const a = artists[0]?.name, t = tracks[0]?.name;
   if (a && t) return `You loop ${a} and call ${t} “variety.”`;
   if (a) return `You vibe like you put ${a} on loop and call it “research.”`;
   if (t) return `You replay ${t} like it's a thesis topic.`;
   return "Chaotic neutral energy. Respect.";
 }
 
-function buildVibe(topGenres = [], tracks = []) {
-  if (topGenres.length && tracks.length) {
-    return `You’re a ${topGenres[0]} listener with a soft spot for ${tracks[0].name}.`;
-  }
-  if (topGenres.length) return `Mostly ${topGenres[0]} with curious detours.`;
+function buildVibe(genres = [], tracks = []) {
+  const top = genres?.[0]?.genre;
+  if (top && tracks.length) return `You’re a ${top} listener with a soft spot for ${tracks[0].name}.`;
+  if (top) return `Mostly ${top} with curious detours.`;
   if (tracks.length) return `Undefined genre, but you’re loyal to ${tracks[0].name}.`;
   return "A musical ghost — build your vibe with a few spins.";
 }
 
-/**
- * Try multiple time ranges for "top" endpoints, then fall back to recently played.
- */
+/** Get top (artists/tracks) with fallback to recently-played (tracks) */
 async function getTopWithFallback(sessionId, type = 'artists', limit = 10) {
-  const ranges = ['medium_term', 'short_term', 'long_term']; // many users only have short_term
-  let items = [];
+  const ranges = ['short_term', 'medium_term', 'long_term'];
   for (const time_range of ranges) {
     try {
       const res = await spotifyGet(sessionId, `me/top/${type}`, { limit, time_range });
-      if (Array.isArray(res?.items) && res.items.length > 0) {
+      if (Array.isArray(res?.items) && res.items.length) {
         return { items: res.items, used: { type, source: 'top', time_range } };
       }
-    } catch (_) {
-      // ignore here; will try next
+    } catch (e) {
+      // ignore per-range failures and continue
     }
   }
-  // fallback to recently played (for tracks only)
+
   if (type === 'tracks') {
     try {
-      const recent = await spotifyGet(sessionId, 'me/player/recently-played', { limit: Math.max(20, limit) });
-      const trackItems = (recent?.items || [])
-        .map(i => i.track)
-        .filter(Boolean)
-        .slice(0, limit);
-      if (trackItems.length > 0) {
-        return { items: trackItems, used: { type, source: 'recently_played' } };
-      }
-    } catch (_) {}
+      const recent = await spotifyGet(sessionId, 'me/player/recently-played', { limit: Math.max(50, limit) });
+      const items = (recent?.items || []).map(i => i.track).filter(Boolean).slice(0, limit);
+      if (items.length) return { items, used: { type, source: 'recently_played' } };
+    } catch (e) {}
   }
-  return { items, used: { type, source: 'none' } };
+
+  return { items: [], used: { type, source: 'none' } };
 }
 
-/**
- * ROUTES
- */
+/** Batch audio features (ids array) */
+async function getAudioFeaturesBatch(sessionId, ids = []) {
+  if (!ids.length) return [];
+  const out = [];
+  // spotify supports up to 100 ids per call
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100).join(',');
+    try {
+      const data = await spotifyGet(sessionId, `audio-features`, { ids: chunk });
+      out.push(...(data.audio_features || []));
+    } catch (e) {
+      // continue on partial failure
+    }
+  }
+  return out.filter(Boolean);
+}
 
-// 1) /auth/spotify -> start the OAuth flow (redirect to Spotify)
+function aggregateAudioFeatures(features = []) {
+  if (!features.length) return null;
+  const keys = ['danceability','energy','valence','acousticness','instrumentalness','liveness','speechiness','tempo'];
+  const acc = {};
+  let count = 0;
+  for (const f of features) {
+    if (!f) continue;
+    keys.forEach(k => {
+      if (typeof f[k] === 'number') acc[k] = (acc[k] || 0) + f[k];
+    });
+    count++;
+  }
+  if (!count) return null;
+  const avg = {};
+  keys.forEach(k => (avg[k] = (acc[k] || 0) / count));
+  return avg;
+}
+
+function hourHistogram(recentItems = []) {
+  const hours = Array.from({ length: 24 }, (_, i) => ({ hour: i, plays: 0 }));
+  for (const item of recentItems || []) {
+    const ts = item.played_at || item.timestamp;
+    if (!ts) continue;
+    const h = new Date(ts).getHours();
+    hours[h].plays += 1;
+  }
+  return hours;
+}
+
+/** -------- AUTH routes -------- */
 app.get('/auth/spotify', (req, res) => {
   const state = randomString(8);
-  res.cookie('oauth_state', state, {
-    signed: true,
-    httpOnly: true,
-    maxAge: 10 * 60 * 1000, // 10 minutes
-    sameSite: 'lax',
-    secure: false, // dev
-  });
-
-  const authUrl = spotifyAuthorizeURL(state);
-  console.log('Redirecting user to Spotify Authorization URL');
-  return res.redirect(authUrl);
+  res.cookie('oauth_state', state, { signed: true, httpOnly: true, maxAge: 10*60*1000, sameSite: 'lax', secure: false });
+  return res.redirect(spotifyAuthorizeURL(state));
 });
 
-/**
- * Callback endpoint (Spotify will redirect here)
- * This must match SPOTIFY_REDIRECT_URI configured in Spotify Developer Dashboard.
- */
 app.get('/auth/spotify/callback', async (req, res) => {
   const { code, state, error } = req.query;
   const signedState = req.signedCookies['oauth_state'];
-
-  if (error) {
-    // user denied or other error
-    return res.redirect(`${FRONTEND_URI}/?error=${encodeURIComponent(error)}`);
-  }
-
-  if (!state || !signedState || state !== signedState) {
-    console.error('State mismatch', { state, signedState });
-    return res.status(400).send('State mismatch or missing. Authentication failed.');
-  }
-
+  if (error) return res.redirect(`${FRONTEND_URI}/?error=${encodeURIComponent(error)}`);
+  if (!state || !signedState || state !== signedState) return res.status(400).send('State mismatch. Auth failed.');
   try {
     const tokenData = await exchangeCodeForToken(code);
-    console.log('TOKEN DATA (scope):', tokenData.scope);
-
-    // create session id and store tokens in memory
     const sessionId = randomString(12);
     const now = Date.now();
     sessions[sessionId] = {
       access_token: tokenData.access_token,
       refresh_token: tokenData.refresh_token,
-      expires_at: tokenData.expires_in ? now + tokenData.expires_in * 1000 : null,
+      expires_at: tokenData.expires_in ? now + tokenData.expires_in * 1000 : null
     };
-
-    console.log('Created session:', sessionId, {
-      hasAccessToken: !!sessions[sessionId].access_token,
-      hasRefreshToken: !!sessions[sessionId].refresh_token,
-      expires_at: sessions[sessionId].expires_at,
-    });
-
-    // set signed session cookie so frontend requests include it
-    res.cookie('vibeify_session', sessionId, {
-      signed: true,
-      httpOnly: true,
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-      sameSite: 'lax',
-      secure: false, // dev
-    });
-
-    // clear oauth_state cookie
+    res.cookie('vibeify_session', sessionId, { signed: true, httpOnly: true, maxAge: 7*24*60*60*1000, sameSite: 'lax', secure: false });
     res.clearCookie('oauth_state');
-
-    // redirect to frontend dashboard
     return res.redirect(`${FRONTEND_URI}/dashboard`);
   } catch (e) {
-    console.error('Token exchange error:', e.response ? e.response.data : e.message);
+    console.error('Token exchange error', e.response?.data || e.message);
     return res.redirect(`${FRONTEND_URI}/?error=token_exchange_failed`);
   }
 });
 
-// Middleware to require signed session cookie
+/** session middleware */
 function requireSession(req, res, next) {
   const sessionId = req.signedCookies['vibeify_session'];
-  if (!sessionId || !sessions[sessionId]) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
+  if (!sessionId || !sessions[sessionId]) return res.status(401).json({ error: 'Not authenticated' });
   req.sessionId = sessionId;
   next();
 }
 
-// Dev helper
+/** small debug helper */
 app.get('/api/debug-session', requireSession, (req, res) => {
   if (NODE_ENV !== 'development') return res.status(404).end();
   const s = sessions[req.sessionId];
-  return res.json({
-    hasAccessToken: !!s.access_token,
-    hasRefreshToken: !!s.refresh_token,
-    expires_at: s.expires_at,
-  });
+  res.json({ hasAccessToken: !!s.access_token, hasRefreshToken: !!s.refresh_token, expires_at: s.expires_at });
 });
 
-// API routes (proxy to Spotify)
+/** simple pass-through endpoints (use spotifyGet) */
 app.get('/api/me', requireSession, async (req, res) => {
-  try {
-    const data = await spotifyGet(req.sessionId, 'me');
-    res.json(data);
-  } catch (e) {
-    console.error('/api/me error', e.message || e);
-    res.status(e.status || 500).json({ error: 'Failed to fetch profile' });
-  }
+  try { const data = await spotifyGet(req.sessionId, 'me'); res.json(data); }
+  catch (e) { res.status(e.status || 500).json({ error: 'Failed to fetch profile' }); }
 });
 
 app.get('/api/top-artists', requireSession, async (req, res) => {
-  const limit = req.query.limit || 10;
-  const time_range = req.query.time_range || 'medium_term';
-  try {
-    const data = await spotifyGet(req.sessionId, 'me/top/artists', { limit, time_range });
-    res.json(data);
-  } catch (e) {
-    console.error('/api/top-artists error', e.message || e);
-    res.status(e.status || 500).json({ error: 'Failed to fetch top artists' });
-  }
+  const limit = req.query.limit || 10; const time_range = req.query.time_range || 'medium_term';
+  try { const data = await spotifyGet(req.sessionId, 'me/top/artists', { limit, time_range }); res.json(data); }
+  catch (e) { res.status(e.status || 500).json({ error: 'Failed to fetch top artists' }); }
 });
 
 app.get('/api/top-tracks', requireSession, async (req, res) => {
-  const limit = req.query.limit || 10;
-  const time_range = req.query.time_range || 'medium_term';
-  try {
-    const data = await spotifyGet(req.sessionId, 'me/top/tracks', { limit, time_range });
-    res.json(data);
-  } catch (e) {
-    console.error('/api/top-tracks error', e.message || e);
-    res.status(e.status || 500).json({ error: 'Failed to fetch top tracks' });
-  }
+  const limit = req.query.limit || 10; const time_range = req.query.time_range || 'medium_term';
+  try { const data = await spotifyGet(req.sessionId, 'me/top/tracks', { limit, time_range }); res.json(data); }
+  catch (e) { res.status(e.status || 500).json({ error: 'Failed to fetch top tracks' }); }
 });
 
 app.get('/api/recently-played', requireSession, async (req, res) => {
+  try { const d = await spotifyGet(req.sessionId, 'me/player/recently-played', { limit: 50 }); res.json(d); }
+  catch (e) { res.status(e.status || 500).json({ error: 'Failed to fetch recently played' }); }
+});
+
+app.get('/api/now-playing', requireSession, async (req, res) => {
+  try { const d = await spotifyGet(req.sessionId, 'me/player'); res.json(d || {}); }
+  catch (e) { res.json({}); }
+});
+
+app.get('/api/playlists', requireSession, async (req, res) => {
+  try { const d = await spotifyGet(req.sessionId, 'me/playlists', { limit: 20 }); res.json(d); }
+  catch (e) { res.status(e.status || 500).json({ error: 'Failed to fetch playlists' }); }
+});
+
+app.get('/api/audio-features', requireSession, async (req, res) => {
   try {
-    const data = await spotifyGet(req.sessionId, 'me/player/recently-played', { limit: 20 });
-    res.json(data);
+    const ids = (req.query.ids || '').split(',').filter(Boolean);
+    const feats = await getAudioFeaturesBatch(req.sessionId, ids);
+    res.json({ audio_features: feats });
   } catch (e) {
-    console.error('/api/recently-played error', e.message || e);
-    res.status(e.status || 500).json({ error: 'Failed to fetch recently played' });
+    res.status(e.status || 500).json({ error: 'Failed to fetch audio features' });
   }
 });
 
-/**
- * NEW: aggregated summary with strong fallbacks.
- * Returns: { profile, topArtists, topTracks, mostListenedArtist, topGenres, roast, vibe, sources }
- */
+/** Main robust summary endpoint (fast and tolerant) */
 app.get('/api/vibe-summary', requireSession, async (req, res) => {
+  const out = { _errors: {} };
+  // We'll parallelize calls for ranges to reduce total time
   try {
     // profile
-    const me = await spotifyGet(req.sessionId, 'me');
+    try { out.profile = await spotifyGet(req.sessionId, 'me'); } catch (e) { out._errors.profile = e.message; out.profile = null; }
 
-    // top artists/tracks with fallbacks (short_term, long_term, then recently played for tracks)
-    const artistsRes = await getTopWithFallback(req.sessionId, 'artists', 8);
-    const tracksRes  = await getTopWithFallback(req.sessionId, 'tracks', 6);
+    // For top artists/tracks per range, request ranges in parallel batches
+    const ranges = ['short_term','medium_term','long_term'];
+    // Build requests per range for artists & tracks
+    const rangePromises = ranges.map(async (r) => {
+      const [artists, tracks] = await Promise.allSettled([
+        spotifyGet(req.sessionId, 'me/top/artists', { limit: 10, time_range: r }),
+        spotifyGet(req.sessionId, 'me/top/tracks', { limit: 10, time_range: r })
+      ]);
+      return { range: r, artists, tracks };
+    });
 
-    const topArtists = artistsRes.items || [];
-    const topTracks  = tracksRes.items || [];
-
-    // derive most listened artist (prefer topArtists[0], otherwise from tracks' first artist)
-    let mostListenedArtist = topArtists[0] || null;
-    if (!mostListenedArtist && topTracks[0]?.artists?.length) {
-      mostListenedArtist = topTracks[0].artists[0];
+    const rangeResults = await Promise.all(rangePromises);
+    out.top = { artists: {}, tracks: {} };
+    for (const rr of rangeResults) {
+      out.top.artists[rr.range] = (rr.artists.status === 'fulfilled' ? (rr.artists.value.items || []) : []);
+      if (rr.artists.status === 'rejected') out._errors[`top_artists_${rr.range}`] = rr.artists.reason.message;
+      out.top.tracks[rr.range] = (rr.tracks.status === 'fulfilled' ? (rr.tracks.value.items || []) : []);
+      if (rr.tracks.status === 'rejected') out._errors[`top_tracks_${rr.range}`] = rr.tracks.reason.message;
     }
 
-    // genres from artists
-    const topGenres = pickTopGenres(topArtists, 3);
+    // pick fallback "main" lists (tracks fallback to recently played)
+    const artistsRes = await getTopWithFallback(req.sessionId, 'artists', 8);
+    const tracksRes = await getTopWithFallback(req.sessionId, 'tracks', 8);
+    out.topArtists = artistsRes.items || [];
+    out.topTracks = tracksRes.items || [];
+    out.sources = { artists: artistsRes.used, tracks: tracksRes.used };
 
-    const roast = buildRoast(topArtists, topTracks);
-    const vibe  = buildVibe(topGenres, topTracks);
+    // recently played + hour histogram
+    try {
+      const recent = await spotifyGet(req.sessionId, 'me/player/recently-played', { limit: 50 });
+      out.recentlyPlayed = recent.items || [];
+      out.activityByHour = hourHistogram(recent.items || []);
+    } catch (e) {
+      out._errors.recentlyPlayed = e.message;
+      out.recentlyPlayed = [];
+      out.activityByHour = hourHistogram([]);
+    }
 
-    res.json({
-      profile: me,
-      topArtists,
-      topTracks,
-      mostListenedArtist,
-      topGenres,
-      roast,
-      vibe,
-      sources: {
-        artists: artistsRes.used,
-        tracks: tracksRes.used,
-      },
-    });
-  } catch (e) {
-    console.error('/api/vibe-summary error', e.message || e);
-    res.status(e.status || 500).json({ error: 'Failed to build vibe summary' });
+    // playlists
+    try { const pls = await spotifyGet(req.sessionId, 'me/playlists', { limit: 20 }); out.playlists = pls.items || []; }
+    catch (e) { out._errors.playlists = e.message; out.playlists = []; }
+
+    // now playing
+    try { const now = await spotifyGet(req.sessionId, 'me/player'); out.nowPlaying = now || {}; }
+    catch (_) { out.nowPlaying = {}; }
+
+    // top genres derived from fallback artists
+    out.topGenres = pickTopGenres(out.topArtists, 8);
+
+    // audio features aggregated (prefer topTracks, else recent)
+    try {
+      const ids = (out.topTracks || []).map(t => t.id).filter(Boolean);
+      if (!ids.length && out.recentlyPlayed.length) ids.push(...(out.recentlyPlayed.map(i => i.track?.id).filter(Boolean)));
+      const feats = await getAudioFeaturesBatch(req.sessionId, ids.slice(0, 80));
+      out.audioFeaturesAvg = aggregateAudioFeatures(feats);
+    } catch (e) { out._errors.audioFeatures = e.message; out.audioFeaturesAvg = null; }
+
+    out.roast = buildRoast(out.topArtists, out.topTracks);
+    out.vibe = buildVibe(out.topGenres, out.topTracks);
+  } catch (outerError) {
+    console.error('/api/vibe-summary outer error', outerError);
+    out._errors.global = outerError.message;
   }
+  return res.json(out);
 });
 
-// Refresh endpoint (optional)
+/** refresh & logout & health routes */
 app.get('/api/refresh', requireSession, async (req, res) => {
   try {
-    const session = sessions[req.sessionId];
-    if (!session || !session.refresh_token) return res.status(400).json({ error: 'No refresh token' });
-    const newTokens = await refreshAccessToken(session.refresh_token);
-    session.access_token = newTokens.access_token;
-    if (newTokens.expires_in) session.expires_at = Date.now() + newTokens.expires_in * 1000;
-    if (newTokens.refresh_token) session.refresh_token = newTokens.refresh_token;
+    const s = sessions[req.sessionId];
+    if (!s?.refresh_token) return res.status(400).json({ error: 'No refresh token' });
+    const newTokens = await refreshAccessToken(s.refresh_token);
+    s.access_token = newTokens.access_token;
+    if (newTokens.expires_in) s.expires_at = Date.now() + newTokens.expires_in * 1000;
+    if (newTokens.refresh_token) s.refresh_token = newTokens.refresh_token;
     res.json({ ok: true });
   } catch (e) {
-    console.error('/api/refresh error', e.message || e);
-    res.status(e.status || 500).json({ error: 'Failed to refresh token' });
+    res.status(e.status || 500).json({ error: 'Failed to refresh' });
   }
 });
 
-// Logout
 app.get('/logout', (req, res) => {
-  const sessionId = req.signedCookies['vibeify_session'];
-  if (sessionId) {
-    delete sessions[sessionId];
-  }
+  const id = req.signedCookies['vibeify_session'];
+  if (id) delete sessions[id];
   res.clearCookie('vibeify_session');
   return res.redirect(FRONTEND_URI);
 });
 
-// Health
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-// Start server
 app.listen(PORT, () => {
   console.log(`Vibeify backend running in ${NODE_ENV} on http://127.0.0.1:${PORT}`);
 });
