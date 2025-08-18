@@ -36,7 +36,6 @@ function randomString(len = 16) {
 const spotifyAxios = axios.create({
   baseURL: 'https://api.spotify.com/v1/',
   timeout: 8000, // 8s per request
-  // don't set headers (Authorization set per-request)
 });
 
 /** Very small retry helper for transient errors */
@@ -49,7 +48,6 @@ async function retry(fn, attempts = 3, initialDelay = 300) {
     } catch (err) {
       attempt++;
       if (attempt >= attempts) throw err;
-      // exponential backoff
       await new Promise(r => setTimeout(r, delay));
       delay *= 2;
     }
@@ -126,7 +124,6 @@ async function spotifyGet(sessionId, path, params = {}) {
       if (newTokens.expires_in) session.expires_at = Date.now() + newTokens.expires_in * 1000;
       if (newTokens.refresh_token) session.refresh_token = newTokens.refresh_token;
     } catch (e) {
-      // propagate refresh failure
       const err = new Error('Failed to refresh token: ' + (e.response?.data?.error || e.message));
       err.status = e.response?.status || 500;
       throw err;
@@ -250,7 +247,7 @@ function hourHistogram(recentItems = []) {
 /** -------- AUTH routes -------- */
 app.get('/auth/spotify', (req, res) => {
   const state = randomString(8);
-  res.cookie('oauth_state', state, { signed: true, httpOnly: true, maxAge: 10*60*1000, sameSite: 'lax', secure: false });
+  res.cookie('oauth_state', state, { signed: true, httpOnly: true, maxAge: 10*60*1000, sameSite: 'lax', secure: NODE_ENV === 'production' });
   return res.redirect(spotifyAuthorizeURL(state));
 });
 
@@ -268,7 +265,7 @@ app.get('/auth/spotify/callback', async (req, res) => {
       refresh_token: tokenData.refresh_token,
       expires_at: tokenData.expires_in ? now + tokenData.expires_in * 1000 : null
     };
-    res.cookie('vibeify_session', sessionId, { signed: true, httpOnly: true, maxAge: 7*24*60*60*1000, sameSite: 'lax', secure: false });
+    res.cookie('vibeify_session', sessionId, { signed: true, httpOnly: true, maxAge: 7*24*60*60*1000, sameSite: 'lax', secure: NODE_ENV === 'production' });
     res.clearCookie('oauth_state');
     return res.redirect(`${FRONTEND_URI}/dashboard`);
   } catch (e) {
@@ -338,14 +335,10 @@ app.get('/api/audio-features', requireSession, async (req, res) => {
 /** Main robust summary endpoint (fast and tolerant) */
 app.get('/api/vibe-summary', requireSession, async (req, res) => {
   const out = { _errors: {} };
-  // We'll parallelize calls for ranges to reduce total time
   try {
-    // profile
     try { out.profile = await spotifyGet(req.sessionId, 'me'); } catch (e) { out._errors.profile = e.message; out.profile = null; }
 
-    // For top artists/tracks per range, request ranges in parallel batches
     const ranges = ['short_term','medium_term','long_term'];
-    // Build requests per range for artists & tracks
     const rangePromises = ranges.map(async (r) => {
       const [artists, tracks] = await Promise.allSettled([
         spotifyGet(req.sessionId, 'me/top/artists', { limit: 10, time_range: r }),
@@ -363,14 +356,12 @@ app.get('/api/vibe-summary', requireSession, async (req, res) => {
       if (rr.tracks.status === 'rejected') out._errors[`top_tracks_${rr.range}`] = rr.tracks.reason.message;
     }
 
-    // pick fallback "main" lists (tracks fallback to recently played)
     const artistsRes = await getTopWithFallback(req.sessionId, 'artists', 8);
     const tracksRes = await getTopWithFallback(req.sessionId, 'tracks', 8);
     out.topArtists = artistsRes.items || [];
     out.topTracks = tracksRes.items || [];
     out.sources = { artists: artistsRes.used, tracks: tracksRes.used };
 
-    // recently played + hour histogram
     try {
       const recent = await spotifyGet(req.sessionId, 'me/player/recently-played', { limit: 50 });
       out.recentlyPlayed = recent.items || [];
@@ -381,18 +372,14 @@ app.get('/api/vibe-summary', requireSession, async (req, res) => {
       out.activityByHour = hourHistogram([]);
     }
 
-    // playlists
     try { const pls = await spotifyGet(req.sessionId, 'me/playlists', { limit: 20 }); out.playlists = pls.items || []; }
     catch (e) { out._errors.playlists = e.message; out.playlists = []; }
 
-    // now playing
     try { const now = await spotifyGet(req.sessionId, 'me/player'); out.nowPlaying = now || {}; }
     catch (_) { out.nowPlaying = {}; }
 
-    // top genres derived from fallback artists
     out.topGenres = pickTopGenres(out.topArtists, 8);
 
-    // audio features aggregated (prefer topTracks, else recent)
     try {
       const ids = (out.topTracks || []).map(t => t.id).filter(Boolean);
       if (!ids.length && out.recentlyPlayed.length) ids.push(...(out.recentlyPlayed.map(i => i.track?.id).filter(Boolean)));
