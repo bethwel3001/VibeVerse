@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import Navbar from '../components/Navbar';
 import Footer from '../components/Footer';
 import {
@@ -9,15 +9,15 @@ import {
   getNowPlaying,
   logout
 } from '../api/spotify';
-import { exportDashboardAsPDF } from '../utils/exportUtils';
+import { exportElementAsPNG, exportElementAsPDF } from '../utils/exportUtils';
 
 import {
   FaShareAlt, FaFilePdf, FaSignOutAlt, FaRedoAlt, FaSpotify,
-  FaPlay, FaPause, FaDownload, FaSyncAlt, FaMusic
+  FaPlay, FaPause, FaDownload, FaSyncAlt, FaMusic, FaImage
 } from 'react-icons/fa';
 
 import { useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend, CartesianGrid
@@ -28,12 +28,11 @@ export default function Dashboard() {
   const [nowPlaying, setNowPlaying] = useState(null);
   const [loading, setLoading] = useState(true);
   const [fatalError, setFatalError] = useState(null);
-  const [tab, setTab] = useState('short_term'); 
-  const [showVibeCard, setShowVibeCard] = useState(false);
+  const [tab, setTab] = useState('short_term');
   const [shareToast, setShareToast] = useState('');
   const [isLocalPlaying, setIsLocalPlaying] = useState(false);
-  const dashboardRef = useRef();
-  const vibeCanvasRef = useRef();
+
+  const dashboardRef = useRef(null);
   const audioRef = useRef(null);
   const pollIntervalRef = useRef(null);
   const navigate = useNavigate();
@@ -42,37 +41,30 @@ export default function Dashboard() {
   const GREEN = '#1DB954';
   const PIE_COLORS = [GREEN, '#7C3AED', '#22D3EE', '#F472B6', '#F59E0B', '#60A5FA'];
 
-  // Professional card motion: load and hover only (no infinite loop)
-  const cardMotionProps = {
-    initial: { opacity: 0, y: 10 },
-    whileInView: { opacity: 1, y: 0 },
-    viewport: { once: true, amount: 0.15 },
-    whileHover: { y: -6, scale: 1.01 },
-    transition: { type: 'spring', stiffness: 140, damping: 18, duration: 0.38 }
+  // motion (load only, no whileInView to avoid re-triggers)
+  const cardMotion = {
+    initial: { opacity: 0, y: 8 },
+    animate: { opacity: 1, y: 0 },
+    transition: { type: 'spring', stiffness: 140, damping: 18, duration: 0.35 }
   };
-
-  // micro tap for buttons
   const microTap = { whileTap: { scale: 0.985 } };
 
-  // ---------------- Data Fetching ----------------
-  async function fetchData() {
+  // ---------------- Data Fetching (stable/no loops) ----------------
+  const fetchData = useCallback(async () => {
     try {
       setLoading(true);
       setFatalError(null);
-      const data = await getVibeSummary();
-      setSummary(data);
 
+      const data = await getVibeSummary();
       // client-side fallback for topTracks if server didn't provide (use recently played)
       if ((data?.topTracks?.length || 0) === 0 && (data?.recentlyPlayed?.length || 0) > 0) {
         const mapped = (data.recentlyPlayed || []).map(r => r.track).filter(Boolean);
-        setSummary(s => ({ ...(s || {}), topTracks: mapped.slice(0, 8) }));
+        data.topTracks = mapped.slice(0, 8);
       }
-
-      // seed nowPlaying if included by server
+      setSummary(data);
       setNowPlaying(data?.nowPlaying || null);
     } catch (e) {
       console.error('Dashboard fetch error', e);
-      // graceful fallback attempt
       try {
         const [me, artists, tracks] = await Promise.all([
           getMe().catch(() => null),
@@ -101,21 +93,22 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
-  // ---------------- Now Playing Poll ----------------
-  const pollNowPlaying = async () => {
+  const pollNowPlaying = useCallback(async () => {
     try {
       const np = await getNowPlaying();
-      if (np && JSON.stringify(np) !== JSON.stringify(nowPlaying)) {
-        setNowPlaying(np);
-      }
-    } catch (err) {
+      setNowPlaying(prev => {
+        if (!np || JSON.stringify(np) === JSON.stringify(prev)) return prev;
+        return np;
+      });
+    } catch (_) {
       // silent
     }
-  };
+  }, []);
 
   useEffect(() => {
+    // run once on mount
     fetchData();
     pollNowPlaying();
     pollIntervalRef.current = setInterval(pollNowPlaying, 10000);
@@ -126,8 +119,7 @@ export default function Dashboard() {
         audioRef.current = null;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchData, pollNowPlaying]);
 
   // ---------------- derived / charts ----------------
   const lineData = useMemo(() => {
@@ -150,10 +142,14 @@ export default function Dashboard() {
   }, [summary]);
 
   const pieData = useMemo(() => {
-    return (summary?.topGenres || []).map((g, idx) => ({ name: g.genre, value: g.count, fill: PIE_COLORS[idx % PIE_COLORS.length] }));
+    return (summary?.topGenres || []).map((g, idx) => ({
+      name: g.genre,
+      value: g.count,
+      fill: PIE_COLORS[idx % PIE_COLORS.length]
+    }));
   }, [summary]);
 
-  // derived artists list built from tracks & recently played (kept simple)
+  // derived artists from tracks & recent
   const derivedTopArtists = useMemo(() => {
     const byId = new Map();
     const addArtist = (a, sampleTrack) => {
@@ -180,7 +176,7 @@ export default function Dashboard() {
   }, [summary]);
 
   // ---------------- Roast fallback ----------------
-  function simpleRoast() {
+  const simpleRoast = useCallback(() => {
     const artists = derivedTopArtists || [];
     const tracks = summary?.topTracks || [];
     if (!artists.length && !tracks.length) return "Your listening is as mysterious as a demo playlist. Go hit play!";
@@ -189,7 +185,7 @@ export default function Dashboard() {
     if (a) return `You vibe like you put ${a} on loop and call it "research."`;
     if (t) return `You replay ${t} like it's a thesis topic.`;
     return "Chaotic neutral energy. Respect.";
-  }
+  }, [derivedTopArtists, summary]);
 
   // ---------------- Local preview playback ----------------
   useEffect(() => {
@@ -200,12 +196,12 @@ export default function Dashboard() {
       setIsLocalPlaying(false);
     }
     if (preview) {
-      audioRef.current = new Audio(preview);
-      audioRef.current.crossOrigin = 'anonymous';
-      audioRef.current.onended = () => setIsLocalPlaying(false);
-      audioRef.current.onerror = () => setIsLocalPlaying(false);
+      const a = new Audio(preview);
+      a.crossOrigin = 'anonymous';
+      a.onended = () => setIsLocalPlaying(false);
+      a.onerror = () => setIsLocalPlaying(false);
+      audioRef.current = a;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nowPlaying?.item?.id, nowPlaying?.item?.preview_url]);
 
   const toggleLocalPlay = async () => {
@@ -243,123 +239,6 @@ export default function Dashboard() {
     }
   };
 
-  // ---------------- Vibe Card canvas (unchanged, commented for quick edits) ----------------
-  const drawVibeCard = async () => {
-    const canvas = vibeCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    const W = (canvas.width = 1080);
-    const H = (canvas.height = 1350);
-
-    // background gradient
-    const g = ctx.createLinearGradient(0, 0, W, H);
-    g.addColorStop(0, '#071018');
-    g.addColorStop(1, '#081F14');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, H);
-
-    // header
-    ctx.fillStyle = '#CFFDEA';
-    ctx.font = 'bold 48px Inter, system-ui, -apple-system';
-    ctx.fillText('Vibeify — Snapshot', 60, 90);
-
-    // name
-    const name = summary?.profile?.display_name || 'Vibe lover';
-    ctx.fillStyle = GREEN;
-    ctx.font = 'bold 38px Inter, system-ui, -apple-system';
-    ctx.fillText(name, 60, 150);
-
-    // sub
-    ctx.fillStyle = '#9CA3AF';
-    ctx.font = '16px Inter, system-ui, -apple-system';
-    ctx.fillText('Welcome — this is your snapshot. Don’t cry when we roast you.', 60, 185);
-
-    // small content: top track & artist
-    const topTrack = summary?.topTracks?.[0];
-    ctx.fillStyle = '#C7D2FE';
-    ctx.font = 'bold 22px Inter, system-ui, -apple-system';
-    ctx.fillText('Top track', 60, 240);
-    ctx.fillStyle = '#E5E7EB';
-    ctx.font = '18px Inter, system-ui, -apple-system';
-    ctx.fillText(topTrack ? `${topTrack.name} — ${(topTrack.artists || []).map(a => a.name).join(', ')}` : '—', 60, 270);
-
-    const topArtist = derivedTopArtists?.[0];
-    ctx.fillStyle = '#C7D2FE';
-    ctx.font = 'bold 22px Inter, system-ui, -apple-system';
-    ctx.fillText('Top artist', 60, 320);
-    ctx.fillStyle = '#E5E7EB';
-    ctx.font = '18px Inter, system-ui, -apple-system';
-    ctx.fillText(topArtist ? `${topArtist.name}` : '—', 60, 350);
-
-    // roast, vibe & sparkline (kept compact)
-    const roast = summary?.roast || simpleRoast();
-    const vibe = summary?.vibe || 'Your vibe will show here.';
-    ctx.fillStyle = '#C7D2FE';
-    ctx.font = 'bold 20px Inter, system-ui, -apple-system';
-    ctx.fillText('Roast', 60, 410);
-    ctx.fillStyle = '#FDE68A';
-    wrapText(ctx, roast, 60, 440, W - 120, 26);
-
-    ctx.fillStyle = '#C7D2FE';
-    ctx.font = 'bold 20px Inter, system-ui, -apple-system';
-    ctx.fillText('Vibe', 60, 520);
-    ctx.fillStyle = '#E5E7EB';
-    wrapText(ctx, vibe, 60, 550, W - 120, 26);
-
-    // footer
-    ctx.fillStyle = '#9CA3AF';
-    ctx.font = '16px Inter, system-ui, -apple-system';
-    ctx.fillText('Made with Vibeify', 60, H - 40);
-  };
-
-  function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
-    const words = (text || '').split(' ');
-    let line = '';
-    for (let n = 0; n < words.length; n++) {
-      const testLine = line + words[n] + ' ';
-      const metrics = ctx.measureText(testLine);
-      if (metrics.width > maxWidth && n > 0) {
-        ctx.fillText(line, x, y);
-        line = words[n] + ' ';
-        y += lineHeight;
-      } else {
-        line = testLine;
-      }
-    }
-    ctx.fillText(line, x, y);
-  }
-
-  const downloadVibeCard = () => {
-    const canvas = vibeCanvasRef.current;
-    if (!canvas) return;
-    const link = document.createElement('a');
-    link.download = 'vibeify-card.png';
-    link.href = canvas.toDataURL('image/png');
-    link.click();
-  };
-
-  useEffect(() => {
-    if (showVibeCard) drawVibeCard();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showVibeCard, summary, JSON.stringify(lineData)]);
-
-  // ---------------- Sharing helpers ----------------
-  const showShare = (text) => {
-    if (navigator.share) {
-      navigator.share({ title: 'My Vibe', text }).catch(() => {});
-      setShareToast('Shared!');
-      setTimeout(() => setShareToast(''), 1200);
-      return;
-    }
-    navigator.clipboard?.writeText(text).then(() => {
-      setShareToast('Copied to clipboard!');
-      setTimeout(() => setShareToast(''), 1400);
-    }).catch(() => {
-      setShareToast('Unable to share.');
-      setTimeout(() => setShareToast(''), 1400);
-    });
-  };
-
   // ---------------- UI states ----------------
   if (loading) {
     return (
@@ -385,18 +264,30 @@ export default function Dashboard() {
   const profile = summary?.profile || {};
   const effectiveRoast = summary?.roast || simpleRoast();
 
-  // A minimal Card wrapper with motion for load & hover
+  // A minimal Card
   const Card = ({ children, className = '' }) => (
-    <motion.div {...cardMotionProps} className={`relative group rounded-2xl p-4 shadow-md bg-gradient-to-br from-[#061116] to-[#07121a] border border-white/6 ${className}`}>
+    <motion.div {...cardMotion} className={`relative rounded-2xl p-4 shadow-md bg-gradient-to-br from-[#061116] to-[#07121a] border border-white/6 ${className}`}>
       {children}
     </motion.div>
   );
+
+  // --- Export handlers (full-page screenshot feel) ---
+  const handleExportPNG = async () => {
+    const node = dashboardRef.current;
+    if (!node) return;
+    await exportElementAsPNG(node, 'vibeify-dashboard.png');
+  };
+
+  const handleExportPDF = async () => {
+    const node = dashboardRef.current;
+    if (!node) return;
+    await exportElementAsPDF(node, 'vibeify-dashboard.pdf');
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-black via-gray-900 to-black text-gray-100">
       <Navbar />
       <main className="max-w-6xl mx-auto px-4 pt-24 pb-16" ref={dashboardRef}>
-
         {/* Header */}
         <header className="flex flex-col md:flex-row items-start md:items-center gap-4">
           <div className="flex items-center gap-4">
@@ -408,23 +299,19 @@ export default function Dashboard() {
             <div className="space-y-0.5 min-w-0">
               <h2 className="text-2xl font-semibold text-green-400 truncate">Hello {profile?.display_name || 'there'} <span>👋</span></h2>
               <p className="text-[13px] text-blue-300/90 truncate">This is your snapshot. Don’t cry when we roast you. 😈</p>
-              <p className="text-xs text-gray-400">Account:: <span className="text-blue-300 font-medium">{profile?.product?.toUpperCase?.() || '—'}</span></p>
+              <p className="text-xs text-gray-400">Account: <span className="text-blue-300 font-medium">{profile?.product?.toUpperCase?.() || '—'}</span></p>
             </div>
           </div>
 
           {/* Controls */}
           <div className="md:ml-auto flex items-center gap-2 flex-wrap">
-            <motion.button {...microTap} onClick={() => exportDashboardAsPDF(dashboardRef.current, 'vibeify.pdf')} className="px-3 py-2 border border-green-500 rounded-lg hover:bg-green-500 hover:text-black transition inline-flex items-center gap-2"><FaFilePdf /> Export</motion.button>
-
-            <motion.button {...microTap} onClick={() => (navigator.share ? navigator.share({ title: 'My Vibe', text: `${profile.display_name || 'I'} checked their vibe on Vibeify!`, url: window.location.href }) : setShowVibeCard(true))} className="px-3 py-2 border border-green-500 rounded-lg hover:bg-green-500 hover:text-black transition inline-flex items-center gap-2"><FaShareAlt /> Share</motion.button>
-
-            <motion.button {...microTap} onClick={() => setShowVibeCard(true)} className="px-3 py-2 border border-indigo-500 text-indigo-200 rounded-lg hover:bg-indigo-500 hover:text-black transition inline-flex items-center gap-2"><FaDownload /> Vibe Card</motion.button>
-
+            <motion.button {...microTap} onClick={handleExportPNG} className="px-3 py-2 border border-green-500 rounded-lg hover:bg-green-500 hover:text-black transition inline-flex items-center gap-2"><FaImage /> Export PNG</motion.button>
+            <motion.button {...microTap} onClick={handleExportPDF} className="px-3 py-2 border border-green-500 rounded-lg hover:bg-green-500 hover:text-black transition inline-flex items-center gap-2"><FaFilePdf /> Export PDF</motion.button>
             <motion.button {...microTap} onClick={async () => { await logout(); navigate('/'); }} className="px-3 py-2 border border-red-500 text-red-400 rounded-lg hover:bg-red-500 hover:text-black transition inline-flex items-center gap-2"><FaSignOutAlt /> Quit</motion.button>
           </div>
         </header>
 
-        {/* Now Playing (compact, no distracting animation) */}
+        {/* Now Playing */}
         <div className="mt-4">
           <Card className="p-3">
             <div className="flex flex-col sm:flex-row sm:items-center gap-3">
@@ -460,7 +347,6 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* optional embed (keeps layout stable) */}
             {nowPlaying?.item?.id ? (
               <div className="mt-3">
                 <iframe
@@ -475,7 +361,7 @@ export default function Dashboard() {
           </Card>
         </div>
 
-        {/* Tabs + Top Lists (Artists arranged same as tracks) */}
+        {/* Tabs + Top Lists */}
         <section className="mt-6">
           <div className="flex gap-2 flex-wrap">
             {['short_term','medium_term','long_term'].map(r => (
@@ -487,14 +373,14 @@ export default function Dashboard() {
           </div>
 
           <div className="grid md:grid-cols-2 gap-4 mt-4">
-            {/* Top Artists (now a stacked list for clarity & small screens) */}
+            {/* Top Artists */}
             <Card>
               <h3 className="text-green-400 font-semibold mb-2">Top Artists</h3>
 
               {derivedTopArtists.length ? (
                 <div className="space-y-3">
                   {derivedTopArtists.map((a, idx) => (
-                    <motion.div key={a.id} whileHover={{ y: -4 }} className="flex items-center gap-3 bg-gray-900/50 p-2 rounded-lg border border-green-500/10">
+                    <div key={a.id} className="flex items-center gap-3 bg-gray-900/50 p-2 rounded-lg border border-green-500/10">
                       <div className="w-12 h-12 rounded-md overflow-hidden bg-gray-800 flex-shrink-0">
                         {a.image ? <img src={a.image} alt={a.name} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-xs opacity-70">No image</div>}
                       </div>
@@ -505,7 +391,7 @@ export default function Dashboard() {
                       </div>
 
                       <div className="text-sm opacity-70">{idx + 1}</div>
-                    </motion.div>
+                    </div>
                   ))}
                 </div>
               ) : (
@@ -513,14 +399,14 @@ export default function Dashboard() {
               )}
             </Card>
 
-            {/* Top Tracks (stacked list) */}
+            {/* Top Tracks */}
             <Card>
               <h3 className="text-green-400 font-semibold mb-2">Top Tracks</h3>
 
               {(summary?.top?.tracks?.[tab] || []).length ? (
                 <div className="space-y-3">
                   {summary.top.tracks[tab].slice(0, 12).map((t, i) => (
-                    <motion.div key={t.id || `${t.name}-${i}`} whileHover={{ y: -3 }} className="flex items-center gap-3 bg-gray-900/50 p-2 rounded-lg border border-green-500/10">
+                    <div key={t.id || `${t.name}-${i}`} className="flex items-center gap-3 bg-gray-900/50 p-2 rounded-lg border border-green-500/10">
                       <div className="w-12 h-12 rounded-md overflow-hidden bg-gray-800">
                         <img src={t.album?.images?.[0]?.url || ''} className="w-full h-full object-cover" alt={t.name} />
                       </div>
@@ -529,7 +415,7 @@ export default function Dashboard() {
                         <div className="text-xs opacity-70 truncate">{(t.artists||[]).map(a=>a.name).join(', ')}</div>
                       </div>
                       <div className="text-sm opacity-70">{i+1}</div>
-                    </motion.div>
+                    </div>
                   ))}
                 </div>
               ) : (
@@ -539,7 +425,7 @@ export default function Dashboard() {
           </div>
         </section>
 
-        {/* Charts row (kept minimal & clean) */}
+        {/* Charts row */}
         <section className="mt-6 grid md:grid-cols-2 gap-4">
           <Card>
             <h3 className="text-green-400 font-semibold mb-2">Listening — last 30 days</h3>
@@ -562,7 +448,7 @@ export default function Dashboard() {
 
           <Card>
             <h3 className="text-green-400 font-semibold mb-2">Genre Mix</h3>
-            {pieData && pieData.length ? (
+            {(pieData && pieData.length) ? (
               <div className="h-56">
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
@@ -587,7 +473,7 @@ export default function Dashboard() {
             {summary?.recentlyPlayed?.length ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {summary.recentlyPlayed.map((rp, idx) => (
-                  <motion.div key={rp.played_at || idx} whileHover={{ y: -3 }} className="bg-gray-900/50 p-3 rounded-lg border border-green-500/12">
+                  <div key={rp.played_at || idx} className="bg-gray-900/50 p-3 rounded-lg border border-green-500/12">
                     <div className="flex gap-3 items-center">
                       <div className="w-12 h-12 rounded overflow-hidden"><img src={rp.track?.album?.images?.[0]?.url || ''} className="w-full h-full object-cover" alt="cover" /></div>
                       <div className="flex-1 min-w-0">
@@ -596,7 +482,7 @@ export default function Dashboard() {
                         <div className="text-[10px] opacity-60 mt-1">{new Date(rp.played_at).toLocaleString()}</div>
                       </div>
                     </div>
-                  </motion.div>
+                  </div>
                 ))}
               </div>
             ) : (
@@ -609,13 +495,13 @@ export default function Dashboard() {
             {summary?.playlists?.length ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                 {summary.playlists.slice(0,12).map(pl => (
-                  <motion.div key={pl.id} whileHover={{ y: -3 }} className="bg-gray-900/50 p-3 rounded-lg border border-green-500/12">
+                  <div key={pl.id} className="bg-gray-900/50 p-3 rounded-lg border border-green-500/12">
                     <div className="w-full aspect-square rounded overflow-hidden mb-2">
                       <img src={pl.images?.[0]?.url || ''} alt={pl.name} className="w-full h-full object-cover" />
                     </div>
                     <div className="text-[13px] font-medium line-clamp-2">{pl.name}</div>
                     <div className="text-[11px] opacity-70">{pl.tracks?.total || 0} tracks</div>
-                  </motion.div>
+                  </div>
                 ))}
               </div>
             ) : (
@@ -624,69 +510,62 @@ export default function Dashboard() {
           </Card>
         </section>
 
-        {/* Roast & Vibe (two cards, slightly stronger hover) */}
+        {/* Roast & Vibe */}
         <section className="mt-6 grid md:grid-cols-2 gap-4">
-          <motion.div {...cardMotionProps} whileHover={{ y: -8, scale: 1.02 }} className="relative group rounded-2xl p-4 shadow-md bg-gradient-to-br from-[#061116] to-[#07121a] border border-white/6">
+          <Card>
             <h3 className="text-green-400 font-semibold mb-2">Roast</h3>
             <p className="italic text-green-300 text-sm mb-4">{effectiveRoast}</p>
             <div className="flex gap-2">
-              <motion.button {...microTap} onClick={() => showShare(effectiveRoast)} className="px-3 py-2 rounded-lg bg-green-500 text-black hover:brightness-95 transition inline-flex items-center gap-2">
+              <motion.button {...microTap} onClick={() => {
+                const text = effectiveRoast;
+                if (navigator.share) {
+                  navigator.share({ title: 'My Vibe', text }).catch(() => {});
+                  setShareToast('Shared!');
+                } else {
+                  navigator.clipboard?.writeText(text).then(() => setShareToast('Copied!'));
+                }
+                setTimeout(() => setShareToast(''), 1200);
+              }} className="px-3 py-2 rounded-lg bg-green-500 text-black hover:brightness-95 transition inline-flex items-center gap-2">
                 <FaShareAlt /> Share Roast
               </motion.button>
-              <motion.button {...microTap} onClick={() => exportDashboardAsPDF(dashboardRef.current, 'vibeify-roast.pdf')} className="px-3 py-2 rounded-lg border border-green-500 text-green-300 hover:bg-green-500 hover:text-black transition inline-flex items-center gap-2">
-                <FaFilePdf /> Export
-              </motion.button>
             </div>
-          </motion.div>
+          </Card>
 
-          <motion.div {...cardMotionProps} whileHover={{ y: -8, scale: 1.02 }} className="relative group rounded-2xl p-4 shadow-md bg-gradient-to-br from-[#061116] to-[#07121a] border border-white/6">
+          <Card>
             <h3 className="text-green-400 font-semibold mb-2">Vibe</h3>
             <p className="text-sm text-gray-200 mb-4">{summary?.vibe || 'Your vibe will show here as you listen more.'}</p>
             <div className="flex gap-2">
-              <motion.button {...microTap} onClick={() => showShare(summary?.vibe || 'My Vibe on Vibeify')} className="px-3 py-2 rounded-lg bg-indigo-500 text-black hover:brightness-95 transition inline-flex items-center gap-2">
+              <motion.button {...microTap} onClick={() => {
+                const text = summary?.vibe || 'My Vibe on Vibeify';
+                if (navigator.share) {
+                  navigator.share({ title: 'My Vibe', text }).catch(() => {});
+                  setShareToast('Shared!');
+                } else {
+                  navigator.clipboard?.writeText(text).then(() => setShareToast('Copied!'));
+                }
+                setTimeout(() => setShareToast(''), 1200);
+              }} className="px-3 py-2 rounded-lg bg-indigo-500 text-black hover:brightness-95 transition inline-flex items-center gap-2">
                 <FaShareAlt /> Share Vibe
               </motion.button>
 
-              <motion.button {...microTap} onClick={() => setShowVibeCard(true)} className="px-3 py-2 rounded-lg border border-indigo-500 text-indigo-300 hover:bg-indigo-500 hover:text-black transition inline-flex items-center gap-2">
-                <FaDownload /> Create Card
+              <motion.button {...microTap} onClick={handleExportPNG} className="px-3 py-2 rounded-lg border border-indigo-500 text-indigo-300 hover:bg-indigo-500 hover:text-black transition inline-flex items-center gap-2">
+                <FaDownload /> Export PNG
               </motion.button>
             </div>
-          </motion.div>
+          </Card>
         </section>
 
         <Footer />
       </main>
 
-      {/* Vibe Card Modal (subtle motion) */}
-      <AnimatePresence>
-        {showVibeCard && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setShowVibeCard(false)}>
-            <motion.div initial={{ y: 20 }} animate={{ y: 0 }} exit={{ y: 20 }} className="bg-[#0B0F14] border border-white/10 rounded-2xl p-4 max-w-[92vw] max-h-[90vh] overflow-auto" onClick={e => e.stopPropagation()}>
-              <div className="flex items-center justify-between mb-3">
-                <div className="text-green-400 font-semibold">Vibe Card Preview</div>
-                <div className="flex gap-2">
-                  <motion.button {...microTap} onClick={drawVibeCard} className="px-3 py-1.5 text-xs rounded-full border border-white/10 hover:border-green-500/40 hover:bg-white/5 inline-flex items-center gap-1.5"><FaSyncAlt /> Refresh</motion.button>
-                  <motion.button {...microTap} onClick={downloadVibeCard} className="px-3 py-1.5 text-xs rounded-full bg-green-500 text-black hover:brightness-95 inline-flex items-center gap-1.5"><FaDownload /> Save PNG</motion.button>
-                </div>
-              </div>
-              <canvas ref={vibeCanvasRef} width={1080} height={1350} className="w-[min(90vw,540px)] h-auto rounded-xl border border-white/10" />
-              <p className="mt-2 text-[12px] text-gray-400">Tip: If image looks low-res, click Refresh before saving.</p>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       {/* share toast */}
-      <AnimatePresence>
-        {shareToast && (
-          <motion.div className="fixed top-6 left-1/2 -translate-x-1/2 z-60 px-4 py-2 rounded-lg border border-green-200 bg-green-600 text-black font-medium" initial={{ y: -20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: -20, opacity: 0 }}>
-            {shareToast}
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {shareToast && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-60 px-4 py-2 rounded-lg border border-green-200 bg-green-600 text-black font-medium">
+          {shareToast}
+        </div>
+      )}
 
       <style>{`
-        /* minimal utility: slow spin removed; keep layout stable */
         .animate-spin-slow { animation: spin 24s linear infinite; }
         @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
       `}</style>
