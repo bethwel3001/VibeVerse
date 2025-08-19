@@ -13,8 +13,9 @@ const {
   SESSION_SECRET = 'super_secret_key',
   SPOTIFY_CLIENT_ID,
   SPOTIFY_CLIENT_SECRET,
-  SPOTIFY_REDIRECT_URI = 'http://127.0.0.1:5000/auth/spotify/callback',
-  FRONTEND_URI = 'http://127.0.0.1:3000',
+  SPOTIFY_REDIRECT_URI = 'https://vibeverse-rwdl.onrender.com/auth/spotify/callback',
+  // FRONTEND_URI = 'http://127.0.0.1:3000',
+  FRONTEND_URI = 'https://loquacious-hummingbird-3e1936.netlify.app/',
   PORT = 5000,
   NODE_ENV = 'development',
 } = process.env;
