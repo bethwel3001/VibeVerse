@@ -1,38 +1,39 @@
-# 🎧 VibeFy 
+# vibefy 
 *A Spotify Mood & Personality Analyzer*
-VibeVerse is a fullstack web app that connects to your Spotify account, analyzes your top tracks and listening habits, and reveals your musical mood, energy, and vibe. Built for the Vibe Coding Hackathon 2025 courtesy of PLP Africa.
+vibefy is a fullstack web app that connects to your Spotify account, analyzes your top tracks and listening habits, and reveals your musical mood, energy and vibes. 
+Built for the Vibe Coding Hackathon 2025 courtesy of PLP Africa.
 
-## ⚡ Tech Stack
+## Tech Stack
 
 - **Frontend**: React + Tailwind + Framer Motion + Lucide + p5.js/D3
 - **Backend**: Node.js + Express + Spotify Auth (PKCE)
 - **Auth Flow**: Authorization Code Flow with PKCE
 - **Features**:
-  - 🎵 Login with Spotify
-  - 🌈 Mood & Personality Insights
-  - 📊 Visual Analytics
-  - 🔥 "Roast Me" AI Fun Mode
-  - 🖼 Shareable Mood Cards
+  - Login with Spotify
+  - Mood & Personality Insights
+  - Visual Analytics
+  - "Roast Me" AI Fun Mode
+  - Shareable Mood Cards
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ---
 
-## 🧪 Setup Instructions
+## Setup Instructions
 ### 1. Clone the Repo
 
 ```bash
 git clone https://github.com/your-username/vibeverse.git
-cd HACKATHON
+cd frontend
 ```
 ### 2. Backend (Auth Server)
 ```bash
 cd backend
 npm install
 ```
-### 🔐 .env Example
+### .env Example
 ```bash
 CLIENT_ID=your_spotify_client_id
 CLIENT_SECRET=your_spotify_secret
@@ -63,5 +64,5 @@ REACT_APP_BACKEND_URL=http://localhost:5000
 Opens at: http://localhost:3000
 ```
 
-## 🧙 Credits
-Built with coffee, Spotify's API, and good vibes.
+## Credits
+Built with coffee, Spotify's API, and good vibes by Be Tu.
