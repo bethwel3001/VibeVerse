@@ -5,12 +5,13 @@ const crypto = require('crypto');
 const qs = require('querystring');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
 
 // Enhanced production settings
-app.set('trust proxy', 1); // Trust first proxy for secure cookies
+app.set('trust proxy', 1);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -19,40 +20,70 @@ const {
   SPOTIFY_CLIENT_ID,
   SPOTIFY_CLIENT_SECRET,
   SPOTIFY_REDIRECT_URI,
+  FRONTEND_URI,
   PORT = 5000,
   NODE_ENV = 'production'
 } = process.env;
 
-if (!SESSION_SECRET || !SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) {
-  console.error('Missing required environment variables');
+// Validate required environment variables
+if (!SESSION_SECRET || !SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET || !SPOTIFY_REDIRECT_URI || !FRONTEND_URI) {
+  console.error('Missing required environment variables:', {
+    SESSION_SECRET: !!SESSION_SECRET,
+    SPOTIFY_CLIENT_ID: !!SPOTIFY_CLIENT_ID,
+    SPOTIFY_CLIENT_SECRET: !!SPOTIFY_CLIENT_SECRET,
+    SPOTIFY_REDIRECT_URI: !!SPOTIFY_REDIRECT_URI,
+    FRONTEND_URI: !!FRONTEND_URI
+  });
   process.exit(1);
 }
 
-// Secure cookie and CORS configuration
+console.log('Environment loaded:', {
+  NODE_ENV,
+  SPOTIFY_REDIRECT_URI,
+  FRONTEND_URI
+});
+
+// Enhanced CORS configuration for frontend-backend communication
+app.use(cors({
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = [
+      FRONTEND_URI,
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'https://vibeify-frontend.onrender.com',
+      'https://vibeify-q112.onrender.com'
+    ];
+    
+    if (allowedOrigins.includes(origin) || origin.endsWith('.onrender.com')) {
+      callback(null, true);
+    } else {
+      console.log('CORS blocked origin:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  exposedHeaders: ['Set-Cookie']
+}));
+
+// Handle preflight requests
+app.options('*', cors());
+
+// Secure cookie parser
 app.use(cookieParser(SESSION_SECRET, {
   secure: NODE_ENV === 'production',
   sameSite: NODE_ENV === 'production' ? 'none' : 'lax'
 }));
 
-app.use(cors({
-  origin: NODE_ENV === 'production' ? SPOTIFY_REDIRECT_URI.split('/auth')[0] : 'http://localhost:3000',
-  credentials: true,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-// Serve static files in production
-if (NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../frontend/build'), {
-    maxAge: '1y',
-    immutable: true
-  }));
-}
-
 // Session store with automatic cleanup
 const sessions = new Map();
-const SESSION_EXPIRY = 7 * 24 * 60 * 60 * 1000; // 7 days
+const SESSION_EXPIRY = 7 * 24 * 60 * 60 * 1000;
 
+// Session cleanup every hour
 setInterval(() => {
   const now = Date.now();
   for (const [id, session] of sessions) {
@@ -60,14 +91,14 @@ setInterval(() => {
       sessions.delete(id);
     }
   }
-}, 60 * 60 * 1000); // Cleanup hourly
+}, 60 * 60 * 1000);
 
 // Utility functions
 const randomString = (len = 16) => crypto.randomBytes(len).toString('hex');
 
 const spotifyApi = axios.create({
   baseURL: 'https://api.spotify.com/v1/',
-  timeout: 10000,
+  timeout: 15000,
   headers: {
     'Accept': 'application/json',
     'Content-Type': 'application/json'
@@ -117,8 +148,10 @@ const exchangeCodeForTokens = async (code) => {
     }), {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': `Basic ${authHeader}`
-      }
+        'Authorization': `Basic ${authHeader}`,
+        'Accept': 'application/json'
+      },
+      timeout: 10000
     });
     return data;
   });
@@ -135,8 +168,10 @@ const refreshTokens = async (refreshToken) => {
     }), {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': `Basic ${authHeader}`
-      }
+        'Authorization': `Basic ${authHeader}`,
+        'Accept': 'application/json'
+      },
+      timeout: 10000
     });
     return data;
   });
@@ -162,7 +197,7 @@ const spotifyRequest = async (sessionId, method, endpoint, params = {}) => {
       }
     } catch (err) {
       sessions.delete(sessionId);
-      throw err;
+      throw new Error('Token refresh failed: ' + err.message);
     }
   }
 
@@ -234,15 +269,23 @@ const calculateAudioFeatures = (tracks = []) => {
 
 // Authentication routes
 app.get('/auth/spotify', (req, res) => {
-  const state = randomString(32);
-  res.cookie('oauth_state', state, {
-    httpOnly: true,
-    secure: NODE_ENV === 'production',
-    sameSite: NODE_ENV === 'production' ? 'none' : 'lax',
-    maxAge: 600000, // 10 minutes
-    signed: true
-  });
-  res.redirect(buildAuthUrl(state));
+  try {
+    const state = randomString(32);
+    res.cookie('oauth_state', state, {
+      httpOnly: true,
+      secure: NODE_ENV === 'production',
+      sameSite: NODE_ENV === 'production' ? 'none' : 'lax',
+      maxAge: 600000,
+      signed: true
+    });
+    
+    const authUrl = buildAuthUrl(state);
+    console.log('Redirecting to Spotify auth:', authUrl);
+    res.redirect(authUrl);
+  } catch (error) {
+    console.error('Auth initiation error:', error);
+    res.status(500).json({ error: 'Failed to initiate authentication' });
+  }
 });
 
 app.get('/auth/spotify/callback', async (req, res) => {
@@ -250,8 +293,17 @@ app.get('/auth/spotify/callback', async (req, res) => {
     const { code, state, error } = req.query;
     const storedState = req.signedCookies.oauth_state;
 
-    if (error) throw new Error(`Spotify auth error: ${error}`);
-    if (!state || !storedState || state !== storedState) throw new Error('Invalid state');
+    console.log('Auth callback received:', { hasCode: !!code, hasState: !!state, hasStoredState: !!storedState });
+
+    if (error) {
+      throw new Error(`Spotify auth error: ${error}`);
+    }
+    if (!state || !storedState || state !== storedState) {
+      throw new Error('Invalid state parameter');
+    }
+    if (!code) {
+      throw new Error('No authorization code received');
+    }
 
     const tokens = await exchangeCodeForTokens(code);
     const sessionId = randomString(32);
@@ -259,7 +311,8 @@ app.get('/auth/spotify/callback', async (req, res) => {
     sessions.set(sessionId, {
       access_token: tokens.access_token,
       refresh_token: tokens.refresh_token,
-      expires_at: Date.now() + (tokens.expires_in * 1000)
+      expires_at: Date.now() + (tokens.expires_in * 1000),
+      created_at: Date.now()
     });
 
     res.cookie('vibeify_session', sessionId, {
@@ -271,12 +324,12 @@ app.get('/auth/spotify/callback', async (req, res) => {
     });
 
     res.clearCookie('oauth_state');
-    res.redirect(NODE_ENV === 'production' ? '/dashboard' : 'http://localhost:3000/dashboard');
+    
+    console.log('Auth successful, redirecting to:', FRONTEND_URI + '/dashboard');
+    res.redirect(FRONTEND_URI + '/dashboard');
   } catch (error) {
-    console.error('Auth callback error:', error);
-    const redirectUrl = NODE_ENV === 'production' 
-      ? `/?error=${encodeURIComponent(error.message)}` 
-      : `http://localhost:3000/?error=${encodeURIComponent(error.message)}`;
+    console.error('Auth callback error:', error.message);
+    const redirectUrl = FRONTEND_URI + `/?error=${encodeURIComponent(error.message)}`;
     res.redirect(redirectUrl);
   }
 });
@@ -285,7 +338,7 @@ app.get('/auth/spotify/callback', async (req, res) => {
 const requireSession = (req, res, next) => {
   const sessionId = req.signedCookies.vibeify_session;
   if (!sessionId || !sessions.has(sessionId)) {
-    return res.status(401).json({ error: 'Unauthorized' });
+    return res.status(401).json({ error: 'Unauthorized - Please login again' });
   }
   req.sessionId = sessionId;
   next();
@@ -297,6 +350,7 @@ app.get('/api/me', requireSession, async (req, res) => {
     const profile = await spotifyRequest(req.sessionId, 'GET', 'me');
     res.json(profile);
   } catch (error) {
+    console.error('Profile fetch error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
   }
 });
@@ -305,14 +359,20 @@ app.get('/api/top/:type', requireSession, async (req, res) => {
   try {
     const { type } = req.params;
     const { limit = 10, time_range = 'medium_term' } = req.query;
+    
+    if (!['artists', 'tracks'].includes(type)) {
+      return res.status(400).json({ error: 'Invalid type. Use "artists" or "tracks"' });
+    }
+
     const data = await spotifyRequest(
       req.sessionId, 
       'GET', 
       `me/top/${type}`, 
-      { limit, time_range }
+      { limit: parseInt(limit), time_range }
     );
     res.json(data);
   } catch (error) {
+    console.error('Top items fetch error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
   }
 });
@@ -324,25 +384,57 @@ app.get('/api/recently-played', requireSession, async (req, res) => {
       req.sessionId, 
       'GET', 
       'me/player/recently-played', 
-      { limit }
+      { limit: parseInt(limit) }
     );
     res.json(data);
   } catch (error) {
+    console.error('Recently played fetch error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
   }
 });
 
 app.get('/api/playlists', requireSession, async (req, res) => {
   try {
-    const { limit = 20 } = req.query;
+    const { limit = 20, offset = 0 } = req.query;
     const data = await spotifyRequest(
       req.sessionId, 
       'GET', 
       'me/playlists', 
-      { limit }
+      { limit: parseInt(limit), offset: parseInt(offset) }
     );
     res.json(data);
   } catch (error) {
+    console.error('Playlists fetch error:', error.message);
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+app.get('/api/now-playing', requireSession, async (req, res) => {
+  try {
+    const data = await spotifyRequest(req.sessionId, 'GET', 'me/player');
+    res.json(data || {});
+  } catch (error) {
+    console.error('Now playing fetch error:', error.message);
+    res.json({});
+  }
+});
+
+app.get('/api/audio-features', requireSession, async (req, res) => {
+  try {
+    const ids = (req.query.ids || '').split(',').filter(Boolean);
+    if (ids.length === 0) {
+      return res.json({ audio_features: [] });
+    }
+    
+    const data = await spotifyRequest(
+      req.sessionId, 
+      'GET', 
+      'audio-features', 
+      { ids: ids.join(',') }
+    );
+    res.json(data);
+  } catch (error) {
+    console.error('Audio features fetch error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
   }
 });
@@ -350,7 +442,7 @@ app.get('/api/playlists', requireSession, async (req, res) => {
 // Comprehensive analysis endpoint
 app.get('/api/vibe-summary', requireSession, async (req, res) => {
   try {
-    const [profile, topArtists, topTracks, recentlyPlayed, playlists] = await Promise.all([
+    const [profile, topArtists, topTracks, recentlyPlayed, playlists] = await Promise.allSettled([
       spotifyRequest(req.sessionId, 'GET', 'me'),
       spotifyRequest(req.sessionId, 'GET', 'me/top/artists', { limit: 10, time_range: 'medium_term' }),
       spotifyRequest(req.sessionId, 'GET', 'me/top/tracks', { limit: 10, time_range: 'medium_term' }),
@@ -358,38 +450,54 @@ app.get('/api/vibe-summary', requireSession, async (req, res) => {
       spotifyRequest(req.sessionId, 'GET', 'me/playlists', { limit: 20 })
     ]);
 
-    // Get audio features for top tracks
-    const trackIds = topTracks.items.map(track => track.id).filter(Boolean);
-    const audioFeatures = trackIds.length > 0 
-      ? await spotifyRequest(req.sessionId, 'GET', 'audio-features', { ids: trackIds.join(',') })
-      : { audio_features: [] };
+    // Process results
+    const result = {
+      profile: profile.status === 'fulfilled' ? profile.value : null,
+      topArtists: topArtists.status === 'fulfilled' ? topArtists.value.items : [],
+      topTracks: topTracks.status === 'fulfilled' ? topTracks.value.items : [],
+      recentlyPlayed: recentlyPlayed.status === 'fulfilled' ? recentlyPlayed.value.items : [],
+      playlists: playlists.status === 'fulfilled' ? playlists.value.items : [],
+      errors: {}
+    };
 
-    // Enhance tracks with audio features
-    const enhancedTracks = topTracks.items.map(track => ({
-      ...track,
-      audio_features: audioFeatures.audio_features.find(f => f?.id === track.id)
-    }));
+    if (profile.status === 'rejected') result.errors.profile = profile.reason.message;
+    if (topArtists.status === 'rejected') result.errors.topArtists = topArtists.reason.message;
+    if (topTracks.status === 'rejected') result.errors.topTracks = topTracks.reason.message;
+    if (recentlyPlayed.status === 'rejected') result.errors.recentlyPlayed = recentlyPlayed.reason.message;
+    if (playlists.status === 'rejected') result.errors.playlists = playlists.reason.message;
+
+    // Get audio features if we have tracks
+    if (result.topTracks.length > 0) {
+      try {
+        const trackIds = result.topTracks.map(track => track.id).filter(Boolean);
+        const audioFeatures = await spotifyRequest(
+          req.sessionId, 
+          'GET', 
+          'audio-features', 
+          { ids: trackIds.slice(0, 100).join(',') }
+        );
+        result.audioFeatures = calculateAudioFeatures(
+          result.topTracks.map(track => ({
+            ...track,
+            audio_features: audioFeatures.audio_features?.find(f => f?.id === track.id)
+          }))
+        );
+      } catch (error) {
+        result.errors.audioFeatures = error.message;
+      }
+    }
 
     // Generate insights
-    const topGenres = analyzeTopGenres(topArtists.items);
-    const audioStats = calculateAudioFeatures(enhancedTracks);
+    result.topGenres = analyzeTopGenres(result.topArtists);
+    result.insights = {
+      primaryGenre: result.topGenres[0]?.genre || 'Unknown',
+      topArtist: result.topArtists[0]?.name || 'None',
+      topTrack: result.topTracks[0]?.name || 'None'
+    };
 
-    res.json({
-      profile,
-      topArtists: topArtists.items,
-      topTracks: enhancedTracks,
-      recentlyPlayed: recentlyPlayed.items,
-      playlists: playlists.items,
-      topGenres,
-      audioFeatures: audioStats,
-      insights: {
-        primaryGenre: topGenres[0]?.genre || 'Unknown',
-        energyLevel: audioStats.energy > 0.7 ? 'High' : audioStats.energy > 0.4 ? 'Medium' : 'Low',
-        mood: audioStats.valence > 0.7 ? 'Positive' : audioStats.valence > 0.4 ? 'Neutral' : 'Mellow'
-      }
-    });
+    res.json(result);
   } catch (error) {
-    console.error('Vibe summary error:', error);
+    console.error('Vibe summary error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
   }
 });
@@ -398,7 +506,9 @@ app.get('/api/vibe-summary', requireSession, async (req, res) => {
 app.post('/api/refresh-token', requireSession, async (req, res) => {
   try {
     const session = sessions.get(req.sessionId);
-    if (!session?.refresh_token) throw new Error('No refresh token available');
+    if (!session?.refresh_token) {
+      return res.status(400).json({ error: 'No refresh token available' });
+    }
 
     const newTokens = await refreshTokens(session.refresh_token);
     session.access_token = newTokens.access_token;
@@ -407,8 +517,9 @@ app.post('/api/refresh-token', requireSession, async (req, res) => {
       session.refresh_token = newTokens.refresh_token;
     }
 
-    res.json({ success: true });
+    res.json({ success: true, expires_at: session.expires_at });
   } catch (error) {
+    console.error('Token refresh error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
   }
 });
@@ -419,34 +530,74 @@ app.post('/api/logout', requireSession, (req, res) => {
   res.json({ success: true });
 });
 
+// Debug endpoints
+app.get('/api/debug/sessions', (req, res) => {
+  if (NODE_ENV !== 'production') {
+    res.json({
+      sessionCount: sessions.size,
+      sessions: Array.from(sessions.entries()).map(([id, session]) => ({
+        id,
+        hasToken: !!session.access_token,
+        expires_at: session.expires_at,
+        created_at: session.created_at
+      }))
+    });
+  } else {
+    res.status(404).end();
+  }
+});
+
+app.get('/api/debug/env', (req, res) => {
+  if (NODE_ENV !== 'production') {
+    res.json({
+      NODE_ENV,
+      SPOTIFY_REDIRECT_URI,
+      FRONTEND_URI,
+      hasClientId: !!SPOTIFY_CLIENT_ID,
+      hasClientSecret: !!SPOTIFY_CLIENT_SECRET,
+      hasSessionSecret: !!SESSION_SECRET
+    });
+  } else {
+    res.status(404).end();
+  }
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK',
     timestamp: new Date().toISOString(),
     environment: NODE_ENV,
-    sessionCount: sessions.size
+    sessionCount: sessions.size,
+    version: '1.0.0'
   });
 });
 
-// Serve React app in production
-if (NODE_ENV === 'production') {
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
-  });
-}
+// Redirect root to frontend
+app.get('/', (req, res) => {
+  res.redirect(FRONTEND_URI);
+});
 
-// Error handling
+// Error handling middleware
 app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'Internal server error' });
+  console.error('Unhandled error:', err.stack);
+  res.status(500).json({ 
+    error: 'Internal server error',
+    message: NODE_ENV === 'development' ? err.message : 'Something went wrong'
+  });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({ error: 'Endpoint not found' });
 });
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`
-  Server running in ${NODE_ENV} mode
-  Listening on port ${PORT}
-  Spotify callback: ${SPOTIFY_REDIRECT_URI}
+🚀 Server running in ${NODE_ENV} mode
+📍 Port: ${PORT}
+🔗 Frontend: ${FRONTEND_URI}
+🎵 Spotify Redirect: ${SPOTIFY_REDIRECT_URI}
   `);
 });
