@@ -15,7 +15,7 @@ const {
   SPOTIFY_CLIENT_SECRET,
   SPOTIFY_REDIRECT_URI = 'https://vibeverse-rwdl.onrender.com/auth/spotify/callback',
   // FRONTEND_URI = 'http://127.0.0.1:3000',
-  FRONTEND_URI = 'https://loquacious-hummingbird-3e1936.netlify.app/',
+  FRONTEND_URI = 'https://lucky-mochi-6895c8.netlify.app',
   PORT = 5000,
   NODE_ENV = 'development',
 } = process.env;
