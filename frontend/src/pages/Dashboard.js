@@ -23,6 +23,22 @@ import {
   PieChart, Pie, Cell, Legend, CartesianGrid
 } from 'recharts';
 
+// Disable Sentry in development to prevent refresh loops
+if (process.env.NODE_ENV === 'development') {
+  // Prevent Sentry from causing infinite re-renders
+  if (window.__SENTRY__) {
+    window.__SENTRY__.logger = {
+      enable: () => {},
+      disable: () => {}
+    };
+  }
+  // Block Sentry initialization
+  window.Sentry = {
+    init: () => {},
+    captureException: () => {}
+  };
+}
+
 export default function Dashboard() {
   const [summary, setSummary] = useState(null);
   const [nowPlaying, setNowPlaying] = useState(null);
@@ -37,6 +53,14 @@ export default function Dashboard() {
   const pollIntervalRef = useRef(null);
   const navigate = useNavigate();
 
+  // Debug mount/unmount
+  useEffect(() => {
+    console.log('Dashboard MOUNTED');
+    return () => {
+      console.log('Dashboard UNMOUNTED');
+    };
+  }, []);
+
   // theme / chart colors
   const GREEN = '#1DB954';
   const PIE_COLORS = [GREEN, '#7C3AED', '#22D3EE', '#F472B6', '#F59E0B', '#60A5FA'];
@@ -49,33 +73,39 @@ export default function Dashboard() {
   };
   const microTap = { whileTap: { scale: 0.985 } };
 
-  // ---------------- Data Fetching (stable/no loops) ----------------
+  // ---------------- STABLE DATA FETCHING (No more loops) ----------------
   const fetchData = useCallback(async () => {
     try {
       setLoading(true);
       setFatalError(null);
 
       const data = await getVibeSummary();
-      // client-side fallback for topTracks if server didn't provide (use recently played)
-      if ((data?.topTracks?.length || 0) === 0 && (data?.recentlyPlayed?.length || 0) > 0) {
-        const mapped = (data.recentlyPlayed || []).map(r => r.track).filter(Boolean);
-        data.topTracks = mapped.slice(0, 8);
+      
+      // Simple client-side fallback without modifying original data
+      const processedData = { ...data };
+      if ((processedData?.topTracks?.length || 0) === 0 && (processedData?.recentlyPlayed?.length || 0) > 0) {
+        const mapped = (processedData.recentlyPlayed || []).map(r => r.track).filter(Boolean);
+        processedData.topTracks = mapped.slice(0, 8);
       }
-      setSummary(data);
-      setNowPlaying(data?.nowPlaying || null);
-    } catch (e) {
-      console.error('Dashboard fetch error', e);
+      
+      setSummary(processedData);
+    } catch (error) {
+      console.error('Dashboard fetch error', error);
       try {
         const [me, artists, tracks] = await Promise.all([
           getMe().catch(() => null),
           getTopArtists(8, 'short_term').catch(() => ({ items: [] })),
           getTopTracks(8, 'short_term').catch(() => ({ items: [] }))
         ]);
-        setSummary({
+        
+        const fallbackData = {
           profile: me,
           topArtists: artists.items || [],
           topTracks: tracks.items || [],
-          top: { artists: { short_term: artists.items || [] }, tracks: { short_term: tracks.items || [] } },
+          top: { 
+            artists: { short_term: artists.items || [] }, 
+            tracks: { short_term: tracks.items || [] } 
+          },
           recentlyPlayed: [],
           activityByHour: Array.from({ length: 24 }, (_, h) => ({ hour: h, plays: 0 })),
           topGenres: [],
@@ -85,129 +115,224 @@ export default function Dashboard() {
           playlists: [],
           nowPlaying: {},
           _errors: { fallback: true }
-        });
-      } catch (e2) {
-        console.error('Fallback fetch failed', e2);
-        setFatalError('⚠ Failed to load Spotify data. Way forward: log out, reconnect, and make sure you grant scopes (user-top-read, user-read-recently-played).');
+        };
+        
+        setSummary(fallbackData);
+      } catch (fallbackError) {
+        console.error('Fallback fetch failed', fallbackError);
+        setFatalError('⚠ Failed to load Spotify data. Please log out and reconnect to Spotify, making sure to grant all required scopes.');
       }
     } finally {
       setLoading(false);
     }
-  }, []);
-
+  }, []); 
   const pollNowPlaying = useCallback(async () => {
     try {
       const np = await getNowPlaying();
       setNowPlaying(prev => {
+        // Deep comparison to prevent unnecessary re-renders
         if (!np || JSON.stringify(np) === JSON.stringify(prev)) return prev;
         return np;
       });
-    } catch (_) {
-      // silent
+    } catch (error) {
+      // Silent fail for polling
+      console.debug('Now playing poll failed:', error.message);
     }
   }, []);
-
   useEffect(() => {
-    // run once on mount
-    fetchData();
-    pollNowPlaying();
-    pollIntervalRef.current = setInterval(pollNowPlaying, 10000);
+    let mounted = true;
+    
+    const initializeDashboard = async () => {
+      if (mounted) {
+        await fetchData();
+        await pollNowPlaying();
+        
+        // Start polling only after initial load
+        pollIntervalRef.current = setInterval(pollNowPlaying, 15000); // Reduced to 15s
+      }
+    };
+
+    initializeDashboard();
+
     return () => {
-      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      mounted = false;
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current = null;
+        setIsLocalPlaying(false);
       }
     };
-  }, [fetchData, pollNowPlaying]);
+  }, []); // EMPTY dependencies - run only once
 
-  // ---------------- derived / charts ----------------
   const lineData = useMemo(() => {
-    const recent = summary?.recentlyPlayed || [];
-    const map = {};
+    if (!summary?.recentlyPlayed) return [];
+    
+    const recent = summary.recentlyPlayed;
+    const playCounts = {};
     const now = new Date();
+    
+    // Initialize last 30 days
     for (let i = 0; i < 30; i++) {
-      const d = new Date(now);
-      d.setDate(now.getDate() - i);
-      const key = d.toISOString().slice(0, 10);
-      map[key] = 0;
+      const date = new Date(now);
+      date.setDate(now.getDate() - i);
+      const key = date.toISOString().slice(0, 10);
+      playCounts[key] = 0;
     }
+    
+    // Count plays
     for (const item of recent) {
-      const ts = item.played_at || item.timestamp;
-      if (!ts) continue;
-      const key = new Date(ts).toISOString().slice(0, 10);
-      if (map[key] !== undefined) map[key] += 1;
+      const timestamp = item.played_at || item.timestamp;
+      if (!timestamp) continue;
+      const dateKey = new Date(timestamp).toISOString().slice(0, 10);
+      if (playCounts[dateKey] !== undefined) {
+        playCounts[dateKey] += 1;
+      }
     }
-    return Object.keys(map).sort().map(k => ({ date: k.slice(5), plays: map[k] }));
-  }, [summary]);
+    
+    return Object.keys(playCounts)
+      .sort()
+      .map(date => ({ 
+        date: date.slice(5), // MM-DD format
+        plays: playCounts[date] 
+      }));
+  }, [summary?.recentlyPlayed]); // Only depend on recentlyPlayed
 
   const pieData = useMemo(() => {
-    return (summary?.topGenres || []).map((g, idx) => ({
-      name: g.genre,
-      value: g.count,
-      fill: PIE_COLORS[idx % PIE_COLORS.length]
+    return (summary?.topGenres || []).map((genre, index) => ({
+      name: genre.genre,
+      value: genre.count,
+      fill: PIE_COLORS[index % PIE_COLORS.length]
     }));
-  }, [summary]);
+  }, [summary?.topGenres]); // Only depend on topGenres
 
-  // derived artists from tracks & recent
+  // Optimized artist derivation
   const derivedTopArtists = useMemo(() => {
-    const byId = new Map();
-    const addArtist = (a, sampleTrack) => {
-      if (!a?.id) return;
-      const prev = byId.get(a.id) || { id: a.id, name: a.name, hits: 0, image: null, genres: [] };
-      prev.hits += 1;
-      const pool = [
-        ...(summary?.top?.artists?.short_term || []),
-        ...(summary?.top?.artists?.medium_term || []),
-        ...(summary?.top?.artists?.long_term || [])
-      ];
-      const found = pool.find(p => p.id === a.id);
-      if (found?.images?.[0]?.url) prev.image = found.images[0].url;
-      if ((found?.genres || []).length) prev.genres = found.genres;
-      if (!prev.image && sampleTrack?.album?.images?.[0]?.url) prev.image = sampleTrack.album.images[0].url;
-      byId.set(a.id, prev);
+    const artistMap = new Map();
+    
+    const addArtistToMap = (artist, sampleTrack = null) => {
+      if (!artist?.id) return;
+      
+      const existing = artistMap.get(artist.id) || { 
+        id: artist.id, 
+        name: artist.name, 
+        hits: 0, 
+        image: null, 
+        genres: [] 
+      };
+      
+      existing.hits += 1;
+      
+      // Try to find better image from top artists data
+      if (!existing.image) {
+        const artistPools = [
+          ...(summary?.top?.artists?.short_term || []),
+          ...(summary?.top?.artists?.medium_term || []),
+          ...(summary?.top?.artists?.long_term || [])
+        ];
+        
+        const foundArtist = artistPools.find(a => a.id === artist.id);
+        if (foundArtist?.images?.[0]?.url) {
+          existing.image = foundArtist.images[0].url;
+        } else if (sampleTrack?.album?.images?.[0]?.url) {
+          existing.image = sampleTrack.album.images[0].url;
+        }
+      }
+      
+      // Get genres from found artist
+      if (existing.genres.length === 0) {
+        const artistPools = [
+          ...(summary?.top?.artists?.short_term || []),
+          ...(summary?.top?.artists?.medium_term || []),
+          ...(summary?.top?.artists?.long_term || [])
+        ];
+        const foundArtist = artistPools.find(a => a.id === artist.id);
+        if (foundArtist?.genres?.length) {
+          existing.genres = foundArtist.genres;
+        }
+      }
+      
+      artistMap.set(artist.id, existing);
     };
 
-    (summary?.topTracks || []).forEach(t => (t?.artists || []).forEach(a => addArtist(a, t)));
-    if (byId.size < 6) {
-      (summary?.recentlyPlayed || []).slice(0, 50).forEach(rp => (rp?.track?.artists || []).forEach(a => addArtist(a, rp.track)));
-    }
-    return Array.from(byId.values()).sort((a, b) => b.hits - a.hits).slice(0, 12);
-  }, [summary]);
+    // Process top tracks artists
+    (summary?.topTracks || []).forEach(track => {
+      (track?.artists || []).forEach(artist => addArtistToMap(artist, track));
+    });
 
-  // ---------------- Roast fallback ----------------
+    // Fallback to recently played if needed
+    if (artistMap.size < 6) {
+      (summary?.recentlyPlayed || []).slice(0, 30).forEach(recent => {
+        (recent?.track?.artists || []).forEach(artist => addArtistToMap(artist, recent.track));
+      });
+    }
+
+    return Array.from(artistMap.values())
+      .sort((a, b) => b.hits - a.hits)
+      .slice(0, 12);
+  }, [summary?.topTracks, summary?.recentlyPlayed, summary?.top?.artists]); // Specific dependencies
+
   const simpleRoast = useCallback(() => {
     const artists = derivedTopArtists || [];
     const tracks = summary?.topTracks || [];
-    if (!artists.length && !tracks.length) return "Your listening is as mysterious as a demo playlist. Go hit play!";
-    const a = artists[0]?.name, t = tracks[0]?.name;
-    if (a && t) return `You loop ${a} and call ${t} "variety."`;
-    if (a) return `You vibe like you put ${a} on loop and call it "research."`;
-    if (t) return `You replay ${t} like it's a thesis topic.`;
-    return "Chaotic neutral energy. Respect.";
-  }, [derivedTopArtists, summary]);
+    
+    if (!artists.length && !tracks.length) {
+      return "Your listening history is as mysterious as a demo playlist. Time to press play!";
+    }
+    
+    const topArtist = artists[0]?.name;
+    const topTrack = tracks[0]?.name;
+    
+    if (topArtist && topTrack) {
+      return `You loop ${topArtist} religiously and call ${topTrack} 'musical variety'. Bold move.`;
+    }
+    if (topArtist) {
+      return `Your vibe is basically ${topArtist} on repeat with occasional identity crises.`;
+    }
+    if (topTrack) {
+      return `You play '${topTrack}' so much, it's basically your personality now.`;
+    }
+    
+    return "Chaotic neutral energy detected. We respect the randomness.";
+  }, [derivedTopArtists, summary?.topTracks]);
 
-  // ---------------- Local preview playback ----------------
   useEffect(() => {
-    const preview = nowPlaying?.item?.preview_url;
+    const currentTrackId = nowPlaying?.item?.id;
+    const previewUrl = nowPlaying?.item?.preview_url;
+    
+    // Clean up previous audio
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current = null;
       setIsLocalPlaying(false);
     }
-    if (preview) {
-      const a = new Audio(preview);
-      a.crossOrigin = 'anonymous';
-      a.onended = () => setIsLocalPlaying(false);
-      a.onerror = () => setIsLocalPlaying(false);
-      audioRef.current = a;
+    
+    // Setup new audio if available
+    if (previewUrl) {
+      const audio = new Audio(previewUrl);
+      audio.crossOrigin = 'anonymous';
+      audio.preload = 'none';
+      
+      audio.onended = () => setIsLocalPlaying(false);
+      audio.onerror = () => {
+        console.debug('Audio playback error');
+        setIsLocalPlaying(false);
+      };
+      audio.onloadstart = () => console.debug('Audio loading started');
+      
+      audioRef.current = audio;
     }
   }, [nowPlaying?.item?.id, nowPlaying?.item?.preview_url]);
 
   const toggleLocalPlay = async () => {
     try {
-      const preview = nowPlaying?.item?.preview_url;
-      if (preview && audioRef.current) {
+      const previewUrl = nowPlaying?.item?.preview_url;
+      
+      // Handle preview audio playback
+      if (previewUrl && audioRef.current) {
         if (!isLocalPlaying) {
           await audioRef.current.play();
           setIsLocalPlaying(true);
@@ -217,33 +342,149 @@ export default function Dashboard() {
         }
         return;
       }
-      // fallback: try backend player control, otherwise open spotify
+      
+      // Fallback to Spotify player control
       try {
-        await fetch((process.env.REACT_APP_SERVER_URL || 'http://127.0.0.1:5000') + '/api/player/toggle', {
-          method: 'POST',
-          credentials: 'include'
-        });
-        await pollNowPlaying();
-      } catch (_) {
-        const id = nowPlaying?.item?.id;
-        if (id) {
-          const deep = `spotify:track:${id}`;
-          const opened = window.open(deep);
-          if (!opened) window.open(`https://open.spotify.com/track/${id}`, '_blank');
+        const response = await fetch(
+          `${process.env.REACT_APP_SERVER_URL || 'http://127.0.0.1:5000'}/api/player/toggle`,
+          {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+        
+        if (response.ok) {
+          await pollNowPlaying();
+        } else {
+          throw new Error('Player control failed');
+        }
+      } catch (playerError) {
+        // Final fallback - open in Spotify
+        const trackId = nowPlaying?.item?.id;
+        if (trackId) {
+          const spotifyUri = `spotify:track:${trackId}`;
+          const spotifyWebUrl = `https://open.spotify.com/track/${trackId}`;
+          
+          // Try URI first, then web URL
+          const opened = window.open(spotifyUri, '_blank');
+          if (!opened || opened.closed || typeof opened.closed === 'undefined') {
+            window.open(spotifyWebUrl, '_blank');
+          }
         }
       }
-    } catch (err) {
-      console.error('toggleLocalPlay error', err);
-      setShareToast('Playback not available in this browser.');
-      setTimeout(() => setShareToast(''), 1800);
+    } catch (error) {
+      console.error('Playback control error:', error);
+      setShareToast('Playback not available in this browser');
+      setTimeout(() => setShareToast(''), 2000);
     }
   };
 
-  // ---------------- UI states ----------------
+  const handleExportPNG = async () => {
+    if (!dashboardRef.current) {
+      setShareToast('Export failed: No content');
+      setTimeout(() => setShareToast(''), 2000);
+      return;
+    }
+    
+    try {
+      await exportElementAsPNG(dashboardRef.current, 'vibeify-dashboard.png');
+      setShareToast('Exported as PNG!');
+      setTimeout(() => setShareToast(''), 2000);
+    } catch (error) {
+      console.error('PNG export error:', error);
+      setShareToast('Export failed');
+      setTimeout(() => setShareToast(''), 2000);
+    }
+  };
+
+  const handleExportPDF = async () => {
+    if (!dashboardRef.current) {
+      setShareToast('Export failed: No content');
+      setTimeout(() => setShareToast(''), 2000);
+      return;
+    }
+    
+    try {
+      await exportElementAsPDF(dashboardRef.current, 'vibeify-dashboard.pdf');
+      setShareToast('Exported as PDF!');
+      setTimeout(() => setShareToast(''), 2000);
+    } catch (error) {
+      console.error('PDF export error:', error);
+      setShareToast('Export failed');
+      setTimeout(() => setShareToast(''), 2000);
+    }
+  };
+
+  const handleShareRoast = async () => {
+    const roastText = summary?.roast || simpleRoast();
+    
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: 'My Vibeify Roast',
+          text: roastText,
+        });
+        setShareToast('Shared!');
+      } else if (navigator.clipboard) {
+        await navigator.clipboard.writeText(roastText);
+        setShareToast('Copied to clipboard!');
+      } else {
+        setShareToast('Sharing not supported');
+      }
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        setShareToast('Share failed');
+      }
+    }
+    
+    setTimeout(() => setShareToast(''), 2000);
+  };
+
+  const handleShareVibe = async () => {
+    const vibeText = summary?.vibe || 'Check out my music vibe on Vibeify!';
+    
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: 'My Music Vibe',
+          text: vibeText,
+        });
+        setShareToast('Shared!');
+      } else if (navigator.clipboard) {
+        await navigator.clipboard.writeText(vibeText);
+        setShareToast('Copied to clipboard!');
+      } else {
+        setShareToast('Sharing not supported');
+      }
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        setShareToast('Share failed');
+      }
+    }
+    
+    setTimeout(() => setShareToast(''), 2000);
+  };
+
+  const handleManualRefresh = async () => {
+    setLoading(true);
+    await fetchData();
+    await pollNowPlaying();
+    setShareToast('Data refreshed!');
+    setTimeout(() => setShareToast(''), 2000);
+  };
+
+  // ---------------- RENDER STATES ----------------
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-black via-gray-900 to-black text-green-500">
-        <div className="text-lg font-semibold">🎵 Loading your vibe...</div>
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-500 mx-auto mb-4"></div>
+          <div className="text-lg font-semibold">Loading your musical vibe...</div>
+          <p className="text-sm text-gray-400 mt-2">This may take a moment</p>
+        </div>
       </div>
     );
   }
@@ -253,9 +494,18 @@ export default function Dashboard() {
       <div className="min-h-screen bg-black text-white">
         <Navbar />
         <main className="max-w-3xl mx-auto px-4 pt-28 text-center">
-          <p className="text-red-400 font-bold italic">{fatalError}</p>
-          <p className="text-sm mt-2 text-gray-400">Way forward: Log out, then reconnect to Spotify. Make sure you approve the scopes we ask for.</p>
-          <button onClick={fetchData} className="mt-4 px-4 py-2 bg-green-500 text-black rounded-lg inline-flex items-center gap-2"><FaRedoAlt /> Retry</button>
+          <div className="bg-red-900/20 border border-red-500/30 rounded-xl p-6 mb-6">
+            <p className="text-red-400 font-bold italic text-lg mb-3">{fatalError}</p>
+            <p className="text-sm text-gray-400 mb-4">
+              Way forward: Log out completely, then reconnect to Spotify. Make sure you approve all the scopes we request.
+            </p>
+          </div>
+          <button 
+            onClick={fetchData} 
+            className="px-6 py-3 bg-green-500 hover:bg-green-600 text-black rounded-lg inline-flex items-center gap-2 transition-colors"
+          >
+            <FaRedoAlt /> Retry Loading
+          </button>
         </main>
       </div>
     );
@@ -263,311 +513,654 @@ export default function Dashboard() {
 
   const profile = summary?.profile || {};
   const effectiveRoast = summary?.roast || simpleRoast();
+  const currentTabTracks = summary?.top?.tracks?.[tab] || [];
+  const hasTopArtists = derivedTopArtists.length > 0;
+  const hasTopTracks = currentTabTracks.length > 0;
+  const hasRecentPlays = summary?.recentlyPlayed?.length > 0;
+  const hasPlaylists = summary?.playlists?.length > 0;
+  const hasChartData = lineData.length > 0;
+  const hasGenreData = pieData.length > 0;
 
-  // A minimal Card
+  // Card Component
   const Card = ({ children, className = '' }) => (
-    <motion.div {...cardMotion} className={`relative rounded-2xl p-4 shadow-md bg-gradient-to-br from-[#061116] to-[#07121a] border border-white/6 ${className}`}>
+    <motion.div 
+      {...cardMotion} 
+      className={`relative rounded-2xl p-4 shadow-lg bg-gradient-to-br from-[#061116] to-[#07121a] border border-white/6 backdrop-blur-sm ${className}`}
+    >
       {children}
     </motion.div>
   );
 
-  // --- Export handlers (full-page screenshot feel) ---
-  const handleExportPNG = async () => {
-    const node = dashboardRef.current;
-    if (!node) return;
-    await exportElementAsPNG(node, 'vibeify-dashboard.png');
-  };
-
-  const handleExportPDF = async () => {
-    const node = dashboardRef.current;
-    if (!node) return;
-    await exportElementAsPDF(node, 'vibeify-dashboard.pdf');
-  };
-
   return (
     <div className="min-h-screen bg-gradient-to-b from-black via-gray-900 to-black text-gray-100">
       <Navbar />
+      
       <main className="max-w-6xl mx-auto px-4 pt-24 pb-16" ref={dashboardRef}>
-        {/* Header */}
-        <header className="flex flex-col md:flex-row items-start md:items-center gap-4">
-          <div className="flex items-center gap-4">
+        {/* Header Section */}
+        <header className="flex flex-col md:flex-row items-start md:items-center gap-6 mb-8">
+          <div className="flex items-center gap-4 flex-1 min-w-0">
             {profile?.images?.[0]?.url ? (
-              <img src={profile.images[0].url} className="w-16 h-16 rounded-full border-2 border-green-500" alt="avatar" />
+              <img 
+                src={profile.images[0].url} 
+                className="w-20 h-20 rounded-full border-3 border-green-500 shadow-lg" 
+                alt="Profile" 
+              />
             ) : (
-              <div className="w-16 h-16 rounded-full bg-gray-800 flex items-center justify-center border-2 border-green-500">🎧</div>
+              <div className="w-20 h-20 rounded-full bg-gray-800 flex items-center justify-center border-3 border-green-500 text-2xl">
+                🎧
+              </div>
             )}
-            <div className="space-y-0.5 min-w-0">
-              <h2 className="text-2xl font-semibold text-green-400 truncate">Hello {profile?.display_name || 'there'} <span>👋</span></h2>
-              <p className="text-[13px] text-blue-300/90 truncate">This is your snapshot. Don’t cry when we roast you. 😈</p>
-              <p className="text-xs text-gray-400">Account: <span className="text-blue-300 font-medium">{profile?.product?.toUpperCase?.() || '—'}</span></p>
+            <div className="space-y-1 min-w-0 flex-1">
+              <h1 className="text-3xl font-bold text-green-400 truncate">
+                Hello {profile?.display_name || 'Music Lover'} <span className="ml-2">👋</span>
+              </h1>
+              <p className="text-blue-300/90 text-sm md:text-base">
+                Your personal music analytics dashboard
+              </p>
+              <p className="text-blue-300/90 text-sm md:text-base">
+                with roasts
+              </p>
+              <p className="text-xs text-gray-400">
+                Account type: <span className="text-blue-300 font-medium">
+                  {profile?.product ? profile.product.toUpperCase() : '—'}
+                </span>
+              </p>
             </div>
           </div>
 
-          {/* Controls */}
-          <div className="md:ml-auto flex items-center gap-2 flex-wrap">
-            <motion.button {...microTap} onClick={handleExportPNG} className="px-3 py-2 border border-green-500 rounded-lg hover:bg-green-500 hover:text-black transition inline-flex items-center gap-2"><FaImage /> Export PNG</motion.button>
-            <motion.button {...microTap} onClick={handleExportPDF} className="px-3 py-2 border border-green-500 rounded-lg hover:bg-green-500 hover:text-black transition inline-flex items-center gap-2"><FaFilePdf /> Export PDF</motion.button>
-            <motion.button {...microTap} onClick={async () => { await logout(); navigate('/'); }} className="px-3 py-2 border border-red-500 text-red-400 rounded-lg hover:bg-red-500 hover:text-black transition inline-flex items-center gap-2"><FaSignOutAlt /> Quit</motion.button>
+          {/* Action Controls */}
+          <div className="flex items-center gap-3 flex-wrap justify-end">
+            <motion.button 
+              {...microTap}
+              onClick={handleManualRefresh}
+              className="px-4 py-2.5 border border-blue-500 text-blue-300 rounded-xl hover:bg-blue-500 hover:text-white transition-all duration-200 inline-flex items-center gap-2 text-sm font-medium"
+            >
+              <FaSyncAlt /> Refresh Data
+            </motion.button>
+            <motion.button 
+              {...microTap}
+              onClick={handleExportPNG}
+              className="px-4 py-2.5 border border-green-500 rounded-xl hover:bg-green-500 hover:text-black transition-all duration-200 inline-flex items-center gap-2 text-sm font-medium"
+            >
+              <FaImage /> Export PNG
+            </motion.button>
+            <motion.button 
+              {...microTap}
+              onClick={handleExportPDF}
+              className="px-4 py-2.5 border border-green-500 rounded-xl hover:bg-green-500 hover:text-black transition-all duration-200 inline-flex items-center gap-2 text-sm font-medium"
+            >
+              <FaFilePdf /> Export PDF
+            </motion.button>
+            <motion.button 
+              {...microTap}
+              onClick={async () => { 
+                await logout(); 
+                navigate('/'); 
+              }}
+              className="px-4 py-2.5 border border-red-500 text-red-400 rounded-xl hover:bg-red-500 hover:text-black transition-all duration-200 inline-flex items-center gap-2 text-sm font-medium"
+            >
+              <FaSignOutAlt /> Sign Out
+            </motion.button>
           </div>
         </header>
 
-        {/* Now Playing */}
-        <div className="mt-4">
-          <Card className="p-3">
-            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="w-12 h-12 rounded-lg overflow-hidden ring-1 ring-white/8">
-                  {nowPlaying?.item?.album?.images?.[0]?.url
-                    ? <img src={nowPlaying.item.album.images[0].url} alt="cover" className="w-full h-full object-cover" />
-                    : <div className="w-full h-full bg-gray-800 flex items-center justify-center"><FaMusic className="opacity-70" /></div>}
+        {/* Now Playing Card */}
+        <section className="mb-8">
+          <Card className="p-4">
+            <div className="flex flex-col lg:flex-row lg:items-center gap-4">
+              {/* Track Info */}
+              <div className="flex items-center gap-4 flex-1 min-w-0">
+                <div className="w-16 h-16 rounded-xl overflow-hidden ring-2 ring-white/10 shadow-lg flex-shrink-0">
+                  {nowPlaying?.item?.album?.images?.[0]?.url ? (
+                    <img 
+                      src={nowPlaying.item.album.images[0].url} 
+                      alt="Album cover" 
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="w-full h-full bg-gray-800 flex items-center justify-center">
+                      <FaMusic className="text-gray-400 text-xl" />
+                    </div>
+                  )}
                 </div>
 
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold truncate flex items-center gap-2">
-                    <FaSpotify className="text-green-500 shrink-0" />
-                    <span className="truncate">{nowPlaying?.item?.name || 'Nothing playing'}</span>
-                    <span className="text-xs text-gray-400 ml-2">• live</span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <FaSpotify className="text-green-500 text-lg flex-shrink-0" />
+                    <span className="text-lg font-semibold truncate">
+                      {nowPlaying?.item?.name || 'No track playing'}
+                    </span>
+                    {nowPlaying?.is_playing && (
+                      <span className="px-2 py-1 bg-green-500/20 text-green-400 rounded-full text-xs font-medium">
+                        LIVE
+                      </span>
+                    )}
                   </div>
-                  <div className="text-xs opacity-70 truncate">{(nowPlaying?.item?.artists || []).map(a => a.name).join(', ') || '—'}</div>
+                  <div className="text-sm text-gray-300 truncate">
+                    {(nowPlaying?.item?.artists || []).map(artist => artist.name).join(', ') || '—'}
+                  </div>
+                  {nowPlaying?.item?.album?.name && (
+                    <div className="text-xs text-gray-400 truncate">
+                      Album: {nowPlaying.item.album.name}
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 sm:ml-auto">
-                <motion.button {...microTap} onClick={pollNowPlaying} className="px-3 py-1.5 text-xs rounded-full border border-white/10 hover:border-green-500/40 hover:bg-white/5 inline-flex items-center gap-1.5"><FaSyncAlt /> Live Sync</motion.button>
+              {/* Playback Controls */}
+              <div className="flex items-center gap-3 flex-wrap">
+                <motion.button 
+                  {...microTap}
+                  onClick={pollNowPlaying}
+                  className="px-4 py-2 rounded-xl border border-white/10 hover:border-green-500/40 hover:bg-white/5 transition-all duration-200 inline-flex items-center gap-2 text-sm"
+                >
+                  <FaSyncAlt /> Refresh
+                </motion.button>
 
-                {nowPlaying?.item?.id ? (
-                  <motion.button {...microTap} onClick={toggleLocalPlay} className="px-3 py-1.5 text-xs rounded-full bg-green-500 text-black hover:brightness-95 inline-flex items-center gap-1.5">
-                    {isLocalPlaying ? (<><FaPause /> Pause</>) : (<><FaPlay /> Play</>)}
+                {nowPlaying?.item?.id && (
+                  <motion.button 
+                    {...microTap}
+                    onClick={toggleLocalPlay}
+                    className="px-4 py-2 rounded-xl bg-green-500 hover:bg-green-600 text-black font-medium transition-all duration-200 inline-flex items-center gap-2 text-sm"
+                  >
+                    {isLocalPlaying ? <><FaPause /> Pause</> : <><FaPlay /> Play Preview</>}
                   </motion.button>
-                ) : null}
+                )}
 
-                {nowPlaying?.item?.id ? (
-                  <a href={`https://open.spotify.com/track/${nowPlaying.item.id}`} target="_blank" rel="noreferrer" className="px-3 py-1.5 text-xs rounded-full border border-white/10 hover:border-green-500/40 hover:bg-white/5 inline-flex items-center gap-1.5">Open in Spotify</a>
-                ) : null}
+                {nowPlaying?.item?.id && (
+                  <a 
+                    href={`https://open.spotify.com/track/${nowPlaying.item.id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-4 py-2 rounded-xl border border-white/10 hover:border-green-500/40 hover:bg-white/5 transition-all duration-200 inline-flex items-center gap-2 text-sm"
+                  >
+                    Open in Spotify
+                  </a>
+                )}
               </div>
             </div>
 
-            {nowPlaying?.item?.id ? (
-              <div className="mt-3">
+            {/* Spotify Embed */}
+            {nowPlaying?.item?.id && (
+              <div className="mt-4">
                 <iframe
-                  title="spotify-embed"
-                  className="w-full h-20 rounded-lg border border-white/10"
+                  title="spotify-track-embed"
+                  className="w-full h-24 rounded-xl border border-white/10 shadow-lg"
                   src={`https://open.spotify.com/embed/track/${nowPlaying.item.id}`}
                   allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
                   loading="lazy"
                 />
               </div>
-            ) : null}
+            )}
           </Card>
-        </div>
+        </section>
 
-        {/* Tabs + Top Lists */}
-        <section className="mt-6">
-          <div className="flex gap-2 flex-wrap">
-            {['short_term','medium_term','long_term'].map(r => (
-              <motion.button key={r} whileTap={{ scale: 0.98 }} onClick={() => setTab(r)}
-                className={`px-3 py-1.5 rounded-full text-sm transition ${tab===r ? 'bg-green-500 text-black' : 'border border-green-500/40 text-green-300 hover:border-green-500/70'}`}>
-                {r === 'short_term' ? '4 Weeks' : r === 'medium_term' ? '6 Months' : 'All Time'}
+        {/* Time Range Tabs & Top Content */}
+        <section className="mb-8">
+          <div className="flex gap-3 flex-wrap mb-6">
+            {[
+              { key: 'short_term', label: '4 Weeks' },
+              { key: 'medium_term', label: '6 Months' },
+              { key: 'long_term', label: 'All Time' }
+            ].map((range) => (
+              <motion.button 
+                key={range.key}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setTab(range.key)}
+                className={`px-5 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 ${
+                  tab === range.key 
+                    ? 'bg-green-500 text-black shadow-lg' 
+                    : 'border border-green-500/40 text-green-300 hover:border-green-500/70 hover:bg-green-500/10'
+                }`}
+              >
+                {range.label}
               </motion.button>
             ))}
           </div>
 
-          <div className="grid md:grid-cols-2 gap-4 mt-4">
+          <div className="grid lg:grid-cols-2 gap-6">
             {/* Top Artists */}
             <Card>
-              <h3 className="text-green-400 font-semibold mb-2">Top Artists</h3>
+              <h3 className="text-green-400 font-bold text-lg mb-4 flex items-center gap-2">
+                <span></span> Top Artists
+              </h3>
 
-              {derivedTopArtists.length ? (
-                <div className="space-y-3">
-                  {derivedTopArtists.map((a, idx) => (
-                    <div key={a.id} className="flex items-center gap-3 bg-gray-900/50 p-2 rounded-lg border border-green-500/10">
-                      <div className="w-12 h-12 rounded-md overflow-hidden bg-gray-800 flex-shrink-0">
-                        {a.image ? <img src={a.image} alt={a.name} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-xs opacity-70">No image</div>}
+              {hasTopArtists ? (
+                <div className="space-y-4">
+                  {derivedTopArtists.map((artist, index) => (
+                    <motion.div 
+                      key={artist.id}
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: index * 0.1 }}
+                      className="flex items-center gap-4 bg-gray-900/50 p-3 rounded-xl border border-green-500/10 hover:border-green-500/30 transition-all duration-200"
+                    >
+                      <div className="w-14 h-14 rounded-lg overflow-hidden bg-gray-800 flex-shrink-0 shadow-md">
+                        {artist.image ? (
+                          <img 
+                            src={artist.image} 
+                            alt={artist.name}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-gray-400">
+                            <FaMusic />
+                          </div>
+                        )}
                       </div>
 
                       <div className="flex-1 min-w-0">
-                        <div className="font-medium truncate">{a.name}</div>
-                        <div className="text-xs opacity-70 truncate">{(a.genres || [])[0] || '—'}</div>
+                        <div className="font-semibold text-gray-100 truncate">
+                          {artist.name}
+                        </div>
+                        <div className="text-sm text-gray-400 truncate">
+                          {artist.genres[0] || 'Various genres'}
+                        </div>
+                        <div className="text-xs text-green-400 mt-1">
+                          {artist.hits} plays
+                        </div>
                       </div>
 
-                      <div className="text-sm opacity-70">{idx + 1}</div>
-                    </div>
+                      <div className="text-lg font-bold text-green-400 w-8 text-center">
+                        {index + 1}
+                      </div>
+                    </motion.div>
                   ))}
                 </div>
               ) : (
-                <p className="text-yellow-400 italic font-semibold">! Not enough data yet — play more and refresh.</p>
+                <div className="text-center py-8">
+                  <div className="text-yellow-400 text-4xl mb-3"></div>
+                  <p className="text-yellow-400 font-semibold mb-2">
+                    Not enough artist data yet
+                  </p>
+                  <p className="text-sm text-gray-400">
+                    Keep listening to build your artist history
+                  </p>
+                </div>
               )}
             </Card>
 
             {/* Top Tracks */}
             <Card>
-              <h3 className="text-green-400 font-semibold mb-2">Top Tracks</h3>
+              <h3 className="text-green-400 font-bold text-lg mb-4 flex items-center gap-2">
+                <span></span> Top Tracks
+              </h3>
 
-              {(summary?.top?.tracks?.[tab] || []).length ? (
-                <div className="space-y-3">
-                  {summary.top.tracks[tab].slice(0, 12).map((t, i) => (
-                    <div key={t.id || `${t.name}-${i}`} className="flex items-center gap-3 bg-gray-900/50 p-2 rounded-lg border border-green-500/10">
-                      <div className="w-12 h-12 rounded-md overflow-hidden bg-gray-800">
-                        <img src={t.album?.images?.[0]?.url || ''} className="w-full h-full object-cover" alt={t.name} />
+              {hasTopTracks ? (
+                <div className="space-y-4">
+                  {currentTabTracks.slice(0, 12).map((track, index) => (
+                    <motion.div 
+                      key={track.id || `${track.name}-${index}`}
+                      initial={{ opacity: 0, x: 10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: index * 0.1 }}
+                      className="flex items-center gap-4 bg-gray-900/50 p-3 rounded-xl border border-green-500/10 hover:border-green-500/30 transition-all duration-200"
+                    >
+                      <div className="w-14 h-14 rounded-lg overflow-hidden bg-gray-800 flex-shrink-0 shadow-md">
+                        <img 
+                          src={track.album?.images?.[0]?.url || ''} 
+                          alt={track.name}
+                          className="w-full h-full object-cover"
+                        />
                       </div>
+                      
                       <div className="flex-1 min-w-0">
-                        <div className="font-medium truncate">{t.name}</div>
-                        <div className="text-xs opacity-70 truncate">{(t.artists||[]).map(a=>a.name).join(', ')}</div>
+                        <div className="font-semibold text-gray-100 truncate">
+                          {track.name}
+                        </div>
+                        <div className="text-sm text-gray-400 truncate">
+                          {(track.artists || []).map(artist => artist.name).join(', ')}
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          {track.album?.name}
+                        </div>
                       </div>
-                      <div className="text-sm opacity-70">{i+1}</div>
-                    </div>
+
+                      <div className="text-lg font-bold text-green-400 w-8 text-center">
+                        {index + 1}
+                      </div>
+                    </motion.div>
                   ))}
                 </div>
               ) : (
-                <p className="text-yellow-400 italic font-semibold">! No top tracks for this range. Tip: play songs to build history.</p>
+                <div className="text-center py-8">
+                  <div className="text-yellow-400 text-4xl mb-3"></div>
+                  <p className="text-yellow-400 font-semibold mb-2">
+                    No top tracks for this period
+                  </p>
+                  <p className="text-sm text-gray-400">
+                    Your listening history will appear here over time
+                  </p>
+                </div>
               )}
             </Card>
           </div>
         </section>
 
-        {/* Charts row */}
-        <section className="mt-6 grid md:grid-cols-2 gap-4">
-          <Card>
-            <h3 className="text-green-400 font-semibold mb-2">Listening — last 30 days</h3>
-            {lineData && lineData.length ? (
-              <div className="h-56">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={lineData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#0b1220" />
-                    <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#9CA3AF' }} />
-                    <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} allowDecimals={false} />
-                    <Tooltip contentStyle={{ backgroundColor: '#071018', borderRadius: 8 }} itemStyle={{ color: '#fff' }} />
-                    <Line type="monotone" dataKey="plays" stroke={GREEN} strokeWidth={3} dot={{ r: 2 }} activeDot={{ r: 6 }} isAnimationActive={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            ) : (
-              <p className="text-yellow-400 italic font-semibold">! Not enough recent plays to build a 30-day chart.</p>
-            )}
-          </Card>
+        {/* Charts Section */}
+        <section className="mb-8">
+          <div className="grid lg:grid-cols-2 gap-6">
+            {/* Listening Activity Chart */}
+            <Card>
+              <h3 className="text-green-400 font-bold text-lg mb-4">
+                Listening Activity (30 Days)
+              </h3>
+              
+              {hasChartData ? (
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={lineData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#0b1220" />
+                      <XAxis 
+                        dataKey="date" 
+                        tick={{ fontSize: 11, fill: '#9CA3AF' }}
+                        interval="preserveStartEnd"
+                      />
+                      <YAxis 
+                        tick={{ fontSize: 11, fill: '#9CA3AF' }} 
+                        allowDecimals={false}
+                      />
+                      <Tooltip 
+                        contentStyle={{ 
+                          backgroundColor: '#071018', 
+                          borderRadius: 8,
+                          border: '1px solid #1DB954'
+                        }} 
+                        itemStyle={{ color: '#fff' }}
+                      />
+                      <Line 
+                        type="monotone" 
+                        dataKey="plays" 
+                        stroke={GREEN}
+                        strokeWidth={3}
+                        dot={{ r: 3, fill: GREEN }}
+                        activeDot={{ r: 6, fill: '#fff', stroke: GREEN, strokeWidth: 2 }}
+                        isAnimationActive={true}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="h-64 flex items-center justify-center">
+                  <div className="text-center">
+                    <div className="text-yellow-400 text-4xl mb-3"></div>
+                    <p className="text-yellow-400 font-semibold mb-2">
+                      Not enough recent activity
+                    </p>
+                    <p className="text-sm text-gray-400">
+                      Your 30-day chart will appear here
+                    </p>
+                  </div>
+                </div>
+              )}
+            </Card>
 
-          <Card>
-            <h3 className="text-green-400 font-semibold mb-2">Genre Mix</h3>
-            {(pieData && pieData.length) ? (
-              <div className="h-56">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={40} outerRadius={80} paddingAngle={4} label={(entry) => entry.name} isAnimationActive={false}>
-                      {pieData.map((entry, idx) => <Cell key={`c-${idx}`} fill={entry.fill} />)}
-                    </Pie>
-                    <Tooltip wrapperStyle={{ background: '#071018', borderRadius: 6 }} />
-                    <Legend verticalAlign="bottom" iconType="circle" />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-            ) : (
-              <p className="text-yellow-400 italic font-semibold">! No genres detected yet — build your top artists.</p>
-            )}
-          </Card>
+            {/* Genre Distribution */}
+            <Card>
+              <h3 className="text-green-400 font-bold text-lg mb-4">
+               Genre Distribution
+              </h3>
+              
+              {hasGenreData ? (
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={pieData}
+                        dataKey="value"
+                        nameKey="name"
+                        innerRadius={50}
+                        outerRadius={90}
+                        paddingAngle={2}
+                        label={({ name, percent }) => 
+                          `${name} (${(percent * 100).toFixed(0)}%)`
+                        }
+                        labelLine={false}
+                        isAnimationActive={true}
+                      >
+                        {pieData.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.fill} />
+                        ))}
+                      </Pie>
+                      <Tooltip 
+                        formatter={(value, name) => [value, name]}
+                        contentStyle={{ 
+                          backgroundColor: '#071018',
+                          borderRadius: 8,
+                          border: '1px solid #1DB954'
+                        }}
+                      />
+                      <Legend 
+                        verticalAlign="bottom" 
+                        height={36}
+                        iconType="circle"
+                        formatter={(value) => <span style={{ color: '#fff', fontSize: '12px' }}>{value}</span>}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="h-64 flex items-center justify-center">
+                  <div className="text-center">
+                    <div className="text-yellow-400 text-4xl mb-3"></div>
+                    <p className="text-yellow-400 font-semibold mb-2">
+                      No genre data available
+                    </p>
+                    <p className="text-sm text-gray-400">
+                      Genres will appear as you listen to more artists
+                    </p>
+                  </div>
+                </div>
+              )}
+            </Card>
+          </div>
         </section>
 
-        {/* Recently Played + Playlists */}
-        <section className="mt-6 grid md:grid-cols-2 gap-4">
-          <Card>
-            <h3 className="text-green-400 font-semibold mb-2">Recently Played</h3>
-            {summary?.recentlyPlayed?.length ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {summary.recentlyPlayed.map((rp, idx) => (
-                  <div key={rp.played_at || idx} className="bg-gray-900/50 p-3 rounded-lg border border-green-500/12">
-                    <div className="flex gap-3 items-center">
-                      <div className="w-12 h-12 rounded overflow-hidden"><img src={rp.track?.album?.images?.[0]?.url || ''} className="w-full h-full object-cover" alt="cover" /></div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-medium truncate">{rp.track?.name}</div>
-                        <div className="text-[11px] opacity-70 truncate">{(rp.track?.artists||[]).map(a=>a.name).join(', ')}</div>
-                        <div className="text-[10px] opacity-60 mt-1">{new Date(rp.played_at).toLocaleString()}</div>
+        {/* Recently Played & Playlists */}
+        <section className="mb-8">
+          <div className="grid lg:grid-cols-2 gap-6">
+            {/* Recently Played */}
+            <Card>
+              <h3 className="text-green-400 font-bold text-lg mb-4">
+                Recently Played
+              </h3>
+
+              {hasRecentPlays ? (
+                <div className="grid gap-4 max-h-96 overflow-y-auto pr-2">
+                  {summary.recentlyPlayed.map((recent, index) => (
+                    <motion.div 
+                      key={recent.played_at || index}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: index * 0.05 }}
+                      className="flex items-center gap-3 bg-gray-900/50 p-3 rounded-xl border border-green-500/10 hover:border-green-500/30 transition-all duration-200"
+                    >
+                      <div className="w-12 h-12 rounded-lg overflow-hidden flex-shrink-0">
+                        <img 
+                          src={recent.track?.album?.images?.[0]?.url || ''} 
+                          alt="Track cover"
+                          className="w-full h-full object-cover"
+                        />
                       </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-yellow-400 italic font-semibold">! No recent plays. Tip: play a couple songs then refresh.</p>
-            )}
-          </Card>
+                      
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-gray-100 truncate text-sm">
+                          {recent.track?.name}
+                        </div>
+                        <div className="text-xs text-gray-400 truncate">
+                          {(recent.track?.artists || []).map(artist => artist.name).join(', ')}
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          {new Date(recent.played_at).toLocaleDateString()} • {new Date(recent.played_at).toLocaleTimeString()}
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <div className="text-yellow-400 text-4xl mb-3"></div>
+                  <p className="text-yellow-400 font-semibold mb-2">
+                    No recent plays found
+                  </p>
+                  <p className="text-sm text-gray-400">
+                    Play some music to see your recent activity here
+                  </p>
+                </div>
+              )}
+            </Card>
 
-          <Card>
-            <h3 className="text-green-400 font-semibold mb-2">Playlists</h3>
-            {summary?.playlists?.length ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-                {summary.playlists.slice(0,12).map(pl => (
-                  <div key={pl.id} className="bg-gray-900/50 p-3 rounded-lg border border-green-500/12">
-                    <div className="w-full aspect-square rounded overflow-hidden mb-2">
-                      <img src={pl.images?.[0]?.url || ''} alt={pl.name} className="w-full h-full object-cover" />
-                    </div>
-                    <div className="text-[13px] font-medium line-clamp-2">{pl.name}</div>
-                    <div className="text-[11px] opacity-70">{pl.tracks?.total || 0} tracks</div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-yellow-400 italic font-semibold">! No playlists found. Create or follow some then refresh.</p>
-            )}
-          </Card>
+            {/* Playlists */}
+            <Card>
+              <h3 className="text-green-400 font-bold text-lg mb-4">
+              Your Playlists
+              </h3>
+
+              {hasPlaylists ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-96 overflow-y-auto pr-2">
+                  {summary.playlists.slice(0, 12).map((playlist, index) => (
+                    <motion.div 
+                      key={playlist.id}
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ delay: index * 0.1 }}
+                      className="bg-gray-900/50 p-3 rounded-xl border border-green-500/10 hover:border-green-500/30 transition-all duration-200"
+                    >
+                      <div className="aspect-square rounded-lg overflow-hidden mb-2 shadow-md">
+                        <img 
+                          src={playlist.images?.[0]?.url || ''} 
+                          alt={playlist.name}
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                      
+                      <div className="space-y-1">
+                        <div className="font-semibold text-gray-100 text-sm line-clamp-2 leading-tight">
+                          {playlist.name}
+                        </div>
+                        <div className="text-xs text-gray-400">
+                          {playlist.tracks?.total || 0} tracks
+                        </div>
+                        {playlist.description && (
+                          <div className="text-xs text-gray-500 line-clamp-2">
+                            {playlist.description}
+                          </div>
+                        )}
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <div className="text-yellow-400 text-4xl mb-3"></div>
+                  <p className="text-yellow-400 font-semibold mb-2">
+                    No playlists found
+                  </p>
+                  <p className="text-sm text-gray-400">
+                    Create or follow playlists to see them here
+                  </p>
+                </div>
+              )}
+            </Card>
+          </div>
         </section>
 
-        {/* Roast & Vibe */}
-        <section className="mt-6 grid md:grid-cols-2 gap-4">
-          <Card>
-            <h3 className="text-green-400 font-semibold mb-2">Roast</h3>
-            <p className="italic text-green-300 text-sm mb-4">{effectiveRoast}</p>
-            <div className="flex gap-2">
-              <motion.button {...microTap} onClick={() => {
-                const text = effectiveRoast;
-                if (navigator.share) {
-                  navigator.share({ title: 'My Vibe', text }).catch(() => {});
-                  setShareToast('Shared!');
-                } else {
-                  navigator.clipboard?.writeText(text).then(() => setShareToast('Copied!'));
-                }
-                setTimeout(() => setShareToast(''), 1200);
-              }} className="px-3 py-2 rounded-lg bg-green-500 text-black hover:brightness-95 transition inline-flex items-center gap-2">
-                <FaShareAlt /> Share Roast
-              </motion.button>
-            </div>
-          </Card>
+        {/* Roast & Vibe Section */}
+        <section className="mb-8">
+          <div className="grid lg:grid-cols-2 gap-6">
+            {/* Roast Card */}
+            <Card>
+              <h3 className="text-green-400 font-bold text-lg mb-4 flex items-center gap-2">
+                <span></span> Personalized Roast
+              </h3>
+              
+              <div className="space-y-4">
+                <div className="bg-gradient-to-r from-green-500/10 to-purple-500/10 p-4 rounded-xl border border-green-500/20">
+                  <p className="text-green-300 italic text-sm leading-relaxed">
+                    {effectiveRoast}
+                  </p>
+                </div>
+                
+                <div className="flex gap-3 flex-wrap">
+                  <motion.button 
+                    {...microTap}
+                    onClick={handleShareRoast}
+                    className="px-4 py-2.5 rounded-xl bg-green-500 hover:bg-green-600 text-black font-medium transition-all duration-200 inline-flex items-center gap-2 text-sm"
+                  >
+                    <FaShareAlt /> Share Roast
+                  </motion.button>
+                  
+                  <motion.button 
+                    {...microTap}
+                    onClick={handleManualRefresh}
+                    className="px-4 py-2.5 rounded-xl border border-green-500/40 text-green-300 hover:border-green-500/70 hover:bg-green-500/10 transition-all duration-200 inline-flex items-center gap-2 text-sm"
+                  >
+                    <FaRedoAlt /> New Roast
+                  </motion.button>
+                </div>
+              </div>
+            </Card>
 
-          <Card>
-            <h3 className="text-green-400 font-semibold mb-2">Vibe</h3>
-            <p className="text-sm text-gray-200 mb-4">{summary?.vibe || 'Your vibe will show here as you listen more.'}</p>
-            <div className="flex gap-2">
-              <motion.button {...microTap} onClick={() => {
-                const text = summary?.vibe || 'My Vibe on Vibeify';
-                if (navigator.share) {
-                  navigator.share({ title: 'My Vibe', text }).catch(() => {});
-                  setShareToast('Shared!');
-                } else {
-                  navigator.clipboard?.writeText(text).then(() => setShareToast('Copied!'));
-                }
-                setTimeout(() => setShareToast(''), 1200);
-              }} className="px-3 py-2 rounded-lg bg-indigo-500 text-black hover:brightness-95 transition inline-flex items-center gap-2">
-                <FaShareAlt /> Share Vibe
-              </motion.button>
-
-              <motion.button {...microTap} onClick={handleExportPNG} className="px-3 py-2 rounded-lg border border-indigo-500 text-indigo-300 hover:bg-indigo-500 hover:text-black transition inline-flex items-center gap-2">
-                <FaDownload /> Export PNG
-              </motion.button>
-            </div>
-          </Card>
+            {/* Vibe Card */}
+            <Card>
+              <h3 className="text-green-400 font-bold text-lg mb-4 flex items-center gap-2">
+                <span></span> Your Music Vibe
+              </h3>
+              
+              <div className="space-y-4">
+                <div className="bg-gradient-to-r from-purple-500/10 to-blue-500/10 p-4 rounded-xl border border-purple-500/20">
+                  <p className="text-purple-300 text-sm leading-relaxed">
+                    {summary?.vibe || 'Your unique music vibe is being analyzed. Keep listening to unlock personalized insights about your musical personality and preferences.'}
+                  </p>
+                </div>
+                
+                <div className="flex gap-3 flex-wrap">
+                  <motion.button 
+                    {...microTap}
+                    onClick={handleShareVibe}
+                    className="px-4 py-2.5 rounded-xl bg-purple-500 hover:bg-purple-600 text-white font-medium transition-all duration-200 inline-flex items-center gap-2 text-sm"
+                  >
+                    <FaShareAlt /> Share Vibe
+                  </motion.button>
+                  
+                  <motion.button 
+                    {...microTap}
+                    onClick={handleExportPNG}
+                    className="px-4 py-2.5 rounded-xl border border-purple-500/40 text-purple-300 hover:border-purple-500/70 hover:bg-purple-500/10 transition-all duration-200 inline-flex items-center gap-2 text-sm"
+                  >
+                    <FaDownload /> Export Vibe
+                  </motion.button>
+                </div>
+              </div>
+            </Card>
+          </div>
         </section>
 
+        {/* Footer */}
         <Footer />
       </main>
 
-      {/* share toast */}
+      {/* Toast Notification */}
       {shareToast && (
-        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-60 px-4 py-2 rounded-lg border border-green-200 bg-green-600 text-black font-medium">
+        <motion.div 
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -20 }}
+          className="fixed top-6 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-xl border border-green-200 bg-green-600 text-black font-semibold shadow-lg"
+        >
           {shareToast}
-        </div>
+        </motion.div>
       )}
 
-      <style>{`
-        .animate-spin-slow { animation: spin 24s linear infinite; }
-        @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+      {/* Custom Styles */}
+      <style jsx>{`
+        .scrollbar-hide::-webkit-scrollbar {
+          display: none;
+        }
+        .scrollbar-hide {
+          -ms-overflow-style: none;
+          scrollbar-width: none;
+        }
       `}</style>
     </div>
   );
